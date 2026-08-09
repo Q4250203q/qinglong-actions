@@ -1,0 +1,9 @@
+name: Initialize
+on:
+  push:
+    branches: [master]
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Workflow initialized successfully"
