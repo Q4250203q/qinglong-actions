@@ -1,0 +1,31 @@
+{
+  "tasks": [
+    {
+      "id": 1,
+      "name": "每日AI新闻早报",
+      "script": "ai_news.py",
+      "cron": "0 9 * * *",
+      "tz": "Asia/Shanghai",
+      "enabled": true,
+      "desc": "每天北京时间 09:00 搜索 AI 行业新闻并生成报告"
+    },
+    {
+      "id": 2,
+      "name": "GitHub Trending 监控",
+      "script": "github_trending.py",
+      "cron": "0 12 * * *",
+      "tz": "Asia/Shanghai",
+      "enabled": true,
+      "desc": "每天北京时间 12:00 抓取 GitHub 热门项目"
+    },
+    {
+      "id": 3,
+      "name": "系统健康检查",
+      "script": "health_check.py",
+      "cron": "*/30 * * * *",
+      "tz": "Asia/Shanghai",
+      "enabled": true,
+      "desc": "每 30 分钟执行一次环境健康检查"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+name: 呆呆面板 · 定时任务调度
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+    - cron: "0 4 * * *"
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "任务 ID，留空执行全部启用任务"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Run tasks
+        env:
+          TASK_ID: ${{ github.event.inputs.task_id }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -n "$TASK_ID" ]; then
+            python3 runner.py --task "$TASK_ID"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            python3 runner.py
+          else
+            python3 runner.py --due
+          fi
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daidai-logs
+          path: logs/
+          if-no-files-found: ignore

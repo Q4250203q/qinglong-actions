@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>呆呆面板 · yyb &amp; 傻妞</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="noise"></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">呆</div>
+      <div>
+        <h1>yyb 调度台</h1>
+        <p class="tag">呆呆面板 · 当前页就是入口 · 傻妞盯盘</p>
+      </div>
+    </div>
+    <div class="clock-block">
+      <div class="clock" id="clock">--:--:--</div>
+      <div class="clock-sub">北京时间</div>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" id="site-link" href="/">调度台</a>
+      <button id="btn-all" class="btn primary">全部执行</button>
+      <button id="btn-refresh" class="btn ghost">刷新</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="ops">
+      <article class="card char yyb">
+        <div class="avatar">Y</div>
+        <div class="meta">
+          <h2>yyb</h2>
+          <span class="role">主调度</span>
+          <p id="line-yyb">调度台已就绪。</p>
+        </div>
+      </article>
+      <article class="card char shaniu">
+        <div class="avatar">妞</div>
+        <div class="meta">
+          <h2>傻妞</h2>
+          <span class="role">气氛组</span>
+          <p id="line-shaniu">傻妞在！</p>
+        </div>
+      </article>
+      <article class="card stats">
+        <div class="stat"><b id="stat-tasks">0</b><span>任务</span></div>
+        <div class="stat"><b id="stat-on">0</b><span>启用</span></div>
+        <div class="stat"><b id="stat-due">0</b><span>待触发</span></div>
+        <div class="stat"><b id="stat-hist">0</b><span>历史</span></div>
+      </article>
+    </section>
+
+    <section class="board">
+      <div class="panel">
+        <div class="panel-head">
+          <h3>任务看板</h3>
+          <span id="busy-badge" class="badge">空闲</span>
+        </div>
+        <div id="task-list" class="task-list"></div>
+        <form id="upload-form" class="add-form upload-form">
+          <input name="file" type="file" accept=".py,text/x-python" required />
+          <input name="name" placeholder="任务名（可空，默认文件名）" />
+          <input name="cron" placeholder="cron 例如 0 9 * * *" />
+          <input name="desc" placeholder="备注" />
+          <label class="check"><input type="checkbox" name="add_task" checked /> 上传后加入看板</label>
+          <button type="submit" class="btn primary">上传脚本</button>
+        </form>
+        <p class="hint">只接受 UTF-8 的 .py，保存到 scripts/，单文件不超过 200KB。</p>
+      </div>
+
+      <div class="side">
+        <div class="panel compact">
+          <div class="panel-head">
+            <h3>最近执行</h3>
+          </div>
+          <div id="timeline" class="timeline"></div>
+        </div>
+        <div class="panel compact">
+          <div class="panel-head">
+            <h3>执行日志</h3>
+            <select id="log-select"></select>
+          </div>
+          <pre id="log-view" class="log-view">选择一条日志查看。</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
