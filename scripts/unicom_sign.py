@@ -1,0 +1,1513 @@
+# coding=utf-8
+"""中国联通营业厅每日签到（适配呆呆面板）
+
+认证方式优先级（放 .env，任选其一即可）：
+
+  1) UNICOM_TOKEN=token_online[#appId]
+  2) UNICOM_COOKIE=完整 Cookie
+  3) UNICOM_ACCOUNT=手机号#登录密码[#appId]
+
+模块（Cookie / ecs_token 可跑的部分）：
+  首页签到、领取签到奖励、话费红包、月签有礼、任务中心、
+  SigninApp 积分/翻倍/1G 日包、娱乐打卡、沃之树、
+  看视频流量、金币抽奖、天天领现金、通通乡村、
+  每周一 10:00 抢兑 10 元话费券。
+
+多账号用 & 连接。密码登录若触发短信风控，改用 Cookie 或 token_online。
+"""
+
+import base64
+import datetime
+import json
+import os
+import random
+import re
+import string
+import sys
+import time
+import uuid
+from time import sleep
+from urllib.parse import parse_qs, quote, urljoin, urlparse
+
+import requests
+from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_v1_5 as Cipher_pkcs1_v1_5
+
+APP_VERSION = "android@11.0802"
+LOGIN_URL = "https://m.client.10010.com/mobileService/login.htm"
+ONLINE_URL = "https://m.client.10010.com/mobileService/onLine.htm"
+SIGNIN_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/signin/daySign"
+CONTINUOUS_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/signin/getContinuous"
+TASK_LIST_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/task/taskList"
+COMPLETE_TASK_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/task/completeTask"
+TASK_REWARD_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/task/getTaskReward"
+MONTH_SIGN_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/floor/getMonthSign"
+GET_TASK_IP_URL = "https://m.client.10010.com/taskcallback/topstories/gettaskip"
+OPENPLAT_URL = "https://m.client.10010.com/mobileService/openPlatform/openPlatLineNew.htm"
+PRIZE_LIST_URL = "https://act.10010.com/SigninApp/new_convert/prizeList"
+PRIZE_CONVERT_URL = "https://act.10010.com/SigninApp/convert/prizeConvert"
+PRIZE_RESULT_URL = "https://act.10010.com/SigninApp/convert/prizeConvertResult"
+TTXC_BASE_URL = "https://epay.10010.com/cu-ca-game-front"
+TTXC_APP_BASE_URL = "https://epay.10010.com/cu-ca-app-front"
+TTXC_CHANNEL = "225"
+TTXC_REFERER = "https://epay.10010.com/cu-ca-game-web/index.html?channel=qdqp"
+TTXC_UA = (
+    "Mozilla/5.0 (Linux; Android 10; MI 8 Build/QKQ1.190828.002; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 "
+    "Mobile Safari/537.36; unicom{version:android@11.0802,desmobile:0};"
+    "devicetype{deviceBrand:Xiaomi,deviceModel:MI 8}"
+)
+TTXC_NEWBIE_STEPS = ["G01", "G02", "G03", "G03_2", "G04", "G05", "G09", "G10", "G11", "G12"]
+TTXC_GARBAGE_WAIT = 8
+TTXC_GROW_MAX = 4
+TTXC_HARVEST_WAIT = 2
+
+PUBLIC_KEY = '''-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDc+CZK9bBA9IU+gZUOc6
+FUGu7yO9WpTNB0PzmgFBh96Mg1WrovD1oqZ+eIF4LjvxKXGOdI79JRdve9
+NPhQo07+uqGQgE4imwNnRx7PFtCRryiIEcUoavuNtuRVoBAm6qdB0Srctg
+aqGfLgKvZHOnwTjyNqjBUxzMeQlEC2czEMSwIDAQAB
+-----END PUBLIC KEY-----'''
+
+ANDROID_UA = "Dalvik/2.1.0 (Linux; U; Android 12; Mi 10 Pro MIUI/21.11.3);unicom{version:android@11.0802}"
+IPHONE_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0_2 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+    "unicom{version:iphone_c@11.0602}"
+)
+SIGNIN_APP_UA = IPHONE_UA
+
+
+def load_dotenv():
+    env_file = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
+    if not os.path.isfile(env_file):
+        return
+    with open(env_file, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+def load_accounts(raw):
+    accounts = []
+    for item in re.split(r"[&]", raw or ""):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split("#")
+        if len(parts) < 2:
+            print("跳过格式错误的账号（需要 手机号#APP登录密码[#appId]）")
+            continue
+        phone = parts[0].strip()
+        password = parts[1].strip()
+        appid = parts[2].strip() if len(parts) >= 3 and parts[2].strip() else ""
+        accounts.append((phone, password, appid))
+    return accounts
+
+
+def load_tokens(raw):
+    tokens = []
+    for item in re.split(r"[&]", raw or ""):
+        item = item.strip()
+        if not item:
+            continue
+        parts = item.split("#")
+        token = parts[0].strip()
+        appid = parts[1].strip() if len(parts) >= 2 else ""
+        if token:
+            tokens.append((token, appid))
+    return tokens
+
+
+def rsa_encrypt(text):
+    payload = str(text) + "".join(str(random.randint(0, 9)) for _ in range(6))
+    rsakey = RSA.importKey(PUBLIC_KEY)
+    cipher = Cipher_pkcs1_v1_5.new(rsakey)
+    return base64.b64encode(cipher.encrypt(payload.encode("utf-8"))).decode("utf-8")
+
+
+def gen_appid():
+    rnd = lambda: str(random.randint(0, 9))
+    return (
+        f"{rnd()}f{rnd()}af{rnd()}{rnd()}ad{rnd()}"
+        "912d306b5053abf90c7ebbb695887bc"
+        "870ae0706d573c348539c26c5c0a878641fcc0d3e90acb9be1e6ef858a"
+        "59af546f3c826988332376b7d18c8ea2398ee3a9c3db947e2471d32a49"
+    ) + rnd() + rnd()
+
+
+def random_string(length, chars=string.ascii_letters + string.digits):
+    return "".join(random.choice(chars) for _ in range(length))
+
+
+def parse_cookie_map(cookie_header):
+    mapping = {}
+    if not cookie_header:
+        return mapping
+    for item in cookie_header.split(";"):
+        item = item.strip()
+        if "=" not in item:
+            continue
+        k, v = item.split("=", 1)
+        mapping[k.strip()] = v.strip()
+    return mapping
+
+
+def cookie_get(cookie_header, name, default=""):
+    return parse_cookie_map(cookie_header).get(name, default)
+
+
+def apply_cookie(session, cookie_header):
+    for k, v in parse_cookie_map(cookie_header).items():
+        session.cookies.set(k, v, domain=".10010.com")
+
+
+def seed_device_cookies(session, token_online, appid=""):
+    tid = uuid.uuid4().hex
+    session.cookies.set("TOKENID_COOKIE", "chinaunicom-" + tid, domain=".10010.com")
+    session.cookies.set("UNICOM_TOKENID", tid, domain=".10010.com")
+    session.cookies.set("sdkuuid", tid, domain=".10010.com")
+    session.cookies.set("token_online", token_online, domain=".10010.com")
+    if appid:
+        session.cookies.set("appId", appid, domain=".10010.com")
+
+
+def login(session, mobile, passwd, appid):
+    if not appid:
+        appid = gen_appid()
+    payload = {
+        "version": APP_VERSION,
+        "mobile": rsa_encrypt(mobile),
+        "reqtime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "deviceModel": "Android",
+        "netWay": "Wifi",
+        "isR4": "0",
+        "password": rsa_encrypt(passwd),
+        "appId": appid,
+    }
+    headers = {
+        "Host": "m.client.10010.com",
+        "Accept": "*/*",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Connection": "keep-alive",
+        "User-Agent": ANDROID_UA,
+        "Accept-Language": "zh-cn",
+    }
+    try:
+        resp = session.post(LOGIN_URL, data=payload, headers=headers, timeout=30)
+        body = resp.json()
+    except Exception as e:
+        return False, f"登录请求异常：{e}", ""
+    code = str(body.get("code"))
+    if code in ("0", "0000") and body.get("token_online"):
+        return True, "登录成功", body["token_online"]
+    msg = body.get("dsc") or body.get("desc") or json.dumps(body, ensure_ascii=False)
+    return False, msg, ""
+
+
+def online(session, token_online, appid=""):
+    data = {
+        "isFirstInstall": "1",
+        "netWay": "Wifi",
+        "version": "android@11.0000",
+        "token_online": token_online,
+        "provinceChanel": "general",
+        "deviceModel": "ALN-AL10",
+        "step": "dingshi",
+        "androidId": uuid.uuid4().hex[:16],
+        "reqtime": int(time.time() * 1000),
+    }
+    if appid:
+        data["appId"] = appid
+    try:
+        resp = session.post(
+            ONLINE_URL,
+            data=data,
+            headers={"User-Agent": ANDROID_UA, "Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30,
+        )
+        body = resp.json()
+    except Exception as e:
+        return False, f"onLine 请求异常：{e}"
+    if str(body.get("code")) in ("0", "0000"):
+        ecs = body.get("ecs_token")
+        if ecs:
+            session.cookies.set("ecs_token", ecs, domain=".10010.com")
+        desmobile = body.get("desmobile") or ""
+        if len(desmobile) == 11 and desmobile.isdigit():
+            session.cookies.set("c_mobile", desmobile, domain=".10010.com")
+        return True, "在线登录成功"
+    return False, body.get("msg") or body.get("desc") or json.dumps(body, ensure_ascii=False)
+
+
+def base_headers(cookie_header=None, extra=None):
+    headers = {
+        "user-agent": IPHONE_UA,
+        "referer": "https://img.client.10010.com",
+        "origin": "https://img.client.10010.com",
+        "content-type": "application/x-www-form-urlencoded",
+        "accept": "application/json, text/plain, */*",
+    }
+    if cookie_header:
+        headers["cookie"] = cookie_header
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def api(session, method, url, cookie_header=None, timeout=15, extra_headers=None, **kwargs):
+    headers = base_headers(cookie_header, extra_headers)
+    if "headers" in kwargs:
+        headers.update(kwargs.pop("headers"))
+    try:
+        resp = session.request(method, url, headers=headers, timeout=timeout, **kwargs)
+        return resp
+    except Exception as e:
+        print(f"  请求异常 {url}: {e}")
+        return None
+
+
+def safe_json(resp):
+    if resp is None:
+        return None
+    try:
+        return resp.json()
+    except Exception:
+        return None
+
+
+def signin(session, cookie_header=None):
+    last = None
+    for attempt in range(1, 4):
+        resp = api(session, "POST", SIGNIN_URL, cookie_header, data={})
+        body = safe_json(resp)
+        if body is None:
+            last = "签到请求失败"
+            sleep(attempt * 2)
+            continue
+        code = str(body.get("code"))
+        desc = body.get("desc") or body.get("dsc") or ""
+        if code == "0000":
+            data = body.get("data") or {}
+            reward = data.get("redSignMessage") or ""
+            status = data.get("statusDesc") or ""
+            msg = f"签到成功 [{status}]{reward}"
+            print(f"  {msg}")
+            return True, reward or "签到成功"
+        if code == "0002" and "已经签到" in desc:
+            print("  今日已签到")
+            return True, "今日已签到"
+        print(f"  第 {attempt} 次签到失败：[code={code}] {desc}")
+        last = f"[code={code}] {desc}"
+        if code == "0001":
+            break
+        sleep(attempt * 2)
+    return False, last
+
+
+def sign_get_continuous(session, cookie_header=None):
+    print("==== 首页签到 ====")
+    imei = cookie_get(cookie_header, "sdkuuid") or uuid.uuid4().hex
+    resp = api(
+        session,
+        "GET",
+        CONTINUOUS_URL,
+        cookie_header,
+        params={"taskId": "", "channel": "wode", "imei": imei},
+    )
+    body = safe_json(resp)
+    if not body:
+        print("  查询签到状态失败")
+        return signin(session, cookie_header)
+    code = str(body.get("code"))
+    if code != "0000":
+        print(f"  查询签到状态失败[{code}]: {body.get('desc', '')}")
+        return signin(session, cookie_header)
+    signed = (body.get("data") or {}).get("todayIsSignIn", "n") == "y"
+    print(f"  今天{'已' if signed else '未'}签到")
+    if signed:
+        return True, "今日已签到"
+    sleep(1)
+    return signin(session, cookie_header)
+
+
+def safe_int(value, default=0):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def session_cookie(session, name, cookie_header=None):
+    val = session.cookies.get(name) or ""
+    if val:
+        return val
+    return cookie_get(cookie_header, name)
+
+
+def sign_claim_signin_rewards(session, cookie_header=None):
+    print("==== 领取签到奖励 ====")
+    extra = {"referer": "https://img.client.10010.com/"}
+    claimed = 0
+    for type_code in ("1", "2"):
+        resp = api(
+            session,
+            "GET",
+            TASK_LIST_URL,
+            cookie_header,
+            params={"type": type_code},
+            extra_headers=extra,
+            timeout=10,
+        )
+        body = safe_json(resp)
+        if not body or str(body.get("code")) != "0000":
+            continue
+        tag_list = (body.get("data") or {}).get("tagList", []) or []
+        task_list = (body.get("data") or {}).get("taskList", []) or []
+        all_tasks = task_list + [t for tag in tag_list for t in tag.get("taskDTOList", [])]
+        for task in [t for t in all_tasks if t]:
+            name = task.get("taskName") or ""
+            if str(task.get("taskState")) != "0":
+                continue
+            if type_code == "2" and "签到" not in name:
+                continue
+            print(f"  领取签到奖励 [{name}]")
+            sign_get_task_reward(session, cookie_header, task.get("id"))
+            claimed += 1
+            sleep(1)
+    if claimed == 0:
+        print("  暂无可领取的签到奖励")
+    return claimed
+
+
+def sign_grab_execute(session, cookie_header, candidate):
+    extra = {
+        "Origin": "https://img.client.10010.com",
+        "Referer": "https://img.client.10010.com/",
+        "X-Requested-With": "com.sinovatech.unicom.ui",
+    }
+    grab_url = (os.getenv("UNICOM_GRAB_URL") or "").strip() or PRIZE_CONVERT_URL
+    for i in range(1, 6):
+        print(f"  [第{i}次] 发起兑换 {candidate['name']}...")
+        resp = api(
+            session,
+            "POST",
+            grab_url,
+            cookie_header,
+            data={"product_id": candidate["id"], "typeCode": candidate["typeCode"]},
+            extra_headers=extra,
+        )
+        body = safe_json(resp)
+        if not body:
+            sleep(0.2)
+            continue
+        uuid_val = (body.get("data") or {}).get("uuid")
+        status = str(body.get("status"))
+        if status == "0000" and uuid_val:
+            print(f"  提交成功，工单 {uuid_val}，查询结果...")
+            check = api(
+                session,
+                "POST",
+                PRIZE_RESULT_URL,
+                cookie_header,
+                data={"uuid": uuid_val},
+                extra_headers=extra,
+            )
+            final = safe_json(check) or {}
+            if str(final.get("status")) == "0000":
+                print(f"  抢兑成功: {candidate['name']}")
+                return True
+            err_code = (final.get("data") or {}).get("errorCode", "")
+            msg = final.get("msg") or final.get("message") or ""
+            print(f"  抢兑失败[{final.get('status')}] {err_code} {msg}")
+        else:
+            print(f"  提交结果: {body.get('msg') or body.get('message') or status}")
+        sleep(0.2)
+    return False
+
+
+def sign_grab_coupon(session, cookie_header=None, amount=None, wait=True):
+    amount = str(amount or os.getenv("UNICOM_GRAB_AMOUNT") or "10")
+    print(f"==== 抢兑 {amount} 元话费券 ====")
+    extra = {"Origin": "https://img.client.10010.com"}
+    resp = api(session, "POST", PRIZE_LIST_URL, cookie_header, extra_headers=extra)
+    body = safe_json(resp)
+    if not body or str(body.get("status")) != "0000":
+        print(f"  获取奖品列表失败: {(body or {}).get('msg', '')}")
+        return False
+    details = (body.get("data") or {}).get("datails") or {}
+    tab_items = details.get("tabItems") or []
+    candidates = []
+    now = datetime.datetime.now()
+    for tab in tab_items:
+        products = tab.get("timeLimitQuanListData") or []
+        round_time_str = tab.get("time") or ""
+        round_date = None
+        try:
+            if round_time_str and ":" in round_time_str:
+                date_str = now.strftime("%Y/%m/%d")
+                full_time_str = f"{date_str} {round_time_str}"
+                if len(round_time_str) <= 8:
+                    round_date = datetime.datetime.strptime(full_time_str, "%Y/%m/%d %H:%M")
+                else:
+                    round_date = datetime.datetime.strptime(round_time_str, "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            round_date = None
+        for item in products:
+            p_name = item.get("product_name") or ""
+            if amount in p_name and ("元" in p_name or "话费" in p_name):
+                print(f"  发现目标: {p_name} (场次 {round_time_str})")
+                candidates.append({
+                    "id": item.get("product_id"),
+                    "name": p_name,
+                    "typeCode": item.get("type_code") or "0",
+                    "timeStr": round_time_str,
+                    "startTime": round_date,
+                })
+    if not candidates:
+        print(f"  未匹配到 {amount} 元话费券")
+        return False
+    best = None
+    min_diff = float("inf")
+    now = datetime.datetime.now()
+    for cand in candidates:
+        start_time = cand["startTime"]
+        if not start_time:
+            continue
+        diff = (start_time - now).total_seconds()
+        if diff > 0:
+            score = diff
+        elif diff > -600:
+            score = abs(diff) + 10000
+        else:
+            score = abs(diff) + 90000
+        if score < min_diff:
+            min_diff = score
+            best = cand
+    if not best:
+        best = candidates[0]
+    print(f"  锁定场次: [{best['timeStr']}] {best['name']}")
+    if wait and best.get("startTime"):
+        wait_seconds = (best["startTime"] - datetime.datetime.now()).total_seconds()
+        if wait_seconds > 180:
+            print(f"  距离开抢还有 {wait_seconds:.0f}s，大于3分钟，跳过等待")
+            return False
+        if wait_seconds > 0:
+            print(f"  等待开抢 {wait_seconds:.1f}s")
+            while (best["startTime"] - datetime.datetime.now()).total_seconds() > 0.5:
+                sleep(0.5)
+    return sign_grab_execute(session, cookie_header, best)
+
+
+def is_weekly_grab_window(now=None):
+    now = now or datetime.datetime.now()
+    return now.weekday() == 0 and now.hour == 10
+
+
+def sign_get_telephone(session, cookie_header=None, is_initial=False, ctx=None):
+    resp = api(session, "POST", "https://act.10010.com/SigninApp/convert/getTelephone", cookie_header, data={})
+    body = safe_json(resp)
+    if not body or str(body.get("status")) != "0000" or not body.get("data"):
+        if body:
+            print(f"  话费红包查询失败[{body.get('status')}]: {body.get('msg', '')}")
+        return None
+    try:
+        amount = float((body.get("data") or {}).get("telephone", 0) or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if ctx is None:
+        ctx = {}
+    if is_initial:
+        ctx["sign_initial_amount"] = amount
+        print(f"  话费红包: 运行前总额 {amount:.2f}元")
+        return amount
+    if "sign_initial_amount" in ctx:
+        print(f"  话费红包: 本次运行增加 {amount - ctx['sign_initial_amount']:.2f}元")
+    msg = f"  话费红包: 总额 {amount:.2f}元"
+    try:
+        exp_num = float((body.get("data") or {}).get("needexpNumber", 0) or 0)
+    except (TypeError, ValueError):
+        exp_num = 0.0
+    if exp_num > 0:
+        month = (body.get("data") or {}).get("month", "")
+        msg += f"，其中 {body['data'].get('needexpNumber', '0')}元 将于 {month}月底到期"
+    print(msg)
+    return amount
+
+
+def gettaskip(session, cookie_header=None, mobile=""):
+    order_id = random_string(32, string.ascii_uppercase + string.digits)
+    try:
+        api(
+            session,
+            "POST",
+            GET_TASK_IP_URL,
+            cookie_header,
+            data={"mobile": mobile or "", "orderId": order_id},
+            timeout=8,
+        )
+    except Exception:
+        pass
+    return order_id
+
+
+def sign_do_task(session, cookie_header, task, mobile=""):
+    url = task.get("url") or ""
+    name = task.get("taskName") or ""
+    if url != "1" and url.startswith("http"):
+        api(session, "GET", url, cookie_header)
+        print(f"  任务中心: 浏览页面 [{name}]")
+        sleep(random.uniform(5, 7))
+    order_id = gettaskip(session, cookie_header, mobile)
+    resp = api(
+        session,
+        "GET",
+        COMPLETE_TASK_URL,
+        cookie_header,
+        params={"taskId": task.get("id"), "orderId": order_id, "systemCode": "QDQD"},
+    )
+    body = safe_json(resp)
+    if not body:
+        print(f"  任务中心: 任务 [{name}] 完成请求失败")
+        return
+    code = str(body.get("code"))
+    if code == "0000":
+        print(f"  任务中心: 任务 [{name}] 已完成")
+    else:
+        print(f"  任务中心: 任务 [{name}] 完成失败[{code}]: {body.get('desc', '')}")
+
+
+def sign_get_task_reward(session, cookie_header, task_id, task_type=None, record_id=None):
+    params = {"taskId": task_id}
+    extra = None
+    if task_type is not None:
+        params["taskType"] = task_type
+        extra = {"referer": "https://img.client.10010.com/"}
+    if record_id is not None:
+        params["id"] = record_id
+    resp = api(session, "GET", TASK_REWARD_URL, cookie_header, params=params, extra_headers=extra)
+    body = safe_json(resp)
+    if not body:
+        print("  领取奖励请求失败")
+        return
+    code = str(body.get("code"))
+    data = body.get("data") or {}
+    if code == "0000" and str(data.get("code", "")) == "0000":
+        prize = f"[{data.get('prizeName', '')}] {data.get('prizeNameRed', '')}".strip()
+        print(f"  领取奖励: {prize or data.get('statusDesc', '领取成功')}")
+    else:
+        print(f"  领取奖励失败[{data.get('code') or code}]: {data.get('desc') or body.get('desc', '')}")
+
+
+def sign_get_task_list(session, cookie_header=None, mobile=""):
+    print("==== 任务中心 ====")
+    extra = {"referer": "https://img.client.10010.com/"}
+    for i in range(12):
+        resp = api(session, "GET", TASK_LIST_URL, cookie_header, params={"type": "2"}, extra_headers=extra, timeout=10)
+        body = safe_json(resp)
+        if not body:
+            return
+        code = str(body.get("code"))
+        if code == "0329" or "火爆" in str(body.get("desc", "")):
+            print("  任务中心: 系统繁忙(0329)，停止后续尝试")
+            break
+        if code != "0000":
+            print(f"  任务中心: 获取任务列表失败[{code}]: {body.get('desc', '')}")
+            return
+        tag_list = (body.get("data") or {}).get("tagList", []) or []
+        task_list = (body.get("data") or {}).get("taskList", []) or []
+        all_tasks = task_list + [t for tag in tag_list for t in tag.get("taskDTOList", [])]
+        all_tasks = [t for t in all_tasks if t]
+        if not all_tasks:
+            if i == 0:
+                print("  任务中心: 当前无任何任务")
+            break
+        do_task = next((t for t in all_tasks if t.get("taskState") == "1" and t.get("taskType") == "5"), None)
+        if do_task:
+            print(f"  任务中心: 开始执行 [{do_task.get('taskName')}]")
+            sign_do_task(session, cookie_header, do_task, mobile)
+            sleep(3)
+            continue
+        claim_task = next((t for t in all_tasks if t.get("taskState") == "0"), None)
+        if claim_task:
+            print(f"  任务中心: 领取 [{claim_task.get('taskName')}]")
+            sign_get_task_reward(session, cookie_header, claim_task.get("id"))
+            sleep(2)
+            continue
+        if i == 0:
+            print("  任务中心: 没有可执行或可领取的任务")
+        else:
+            print("  任务中心: 所有任务处理完毕")
+        break
+
+
+def sign_month_sign_gift(session, cookie_header=None):
+    print("==== 月签有礼 ====")
+    extra = {"referer": "https://img.client.10010.com/"}
+    resp = api(session, "GET", MONTH_SIGN_URL, cookie_header, extra_headers=extra)
+    body = safe_json(resp)
+    if not body or str(body.get("code")) != "0000":
+        desc = (body or {}).get("desc", "")
+        print(f"  月签有礼: 查询失败[{(body or {}).get('code')}]: {desc}")
+        return
+    task_list = (body.get("data") or {}).get("taskList", []) or []
+    if not task_list:
+        print("  月签有礼: 暂无月签任务")
+        return
+    claim_tasks = [t for t in task_list if str(t.get("taskStatus")) == "1" and t.get("taskId") and t.get("id")]
+    claimed_count = sum(1 for t in task_list if str(t.get("taskStatus")) == "2")
+    if not claim_tasks:
+        print(f"  月签有礼: 暂无可领取奖励，已领取 {claimed_count}/{len(task_list)}")
+        return
+    for task in claim_tasks:
+        name = task.get("taskName") or "月签奖励"
+        print(f"  月签有礼: 领取 [{name}]")
+        sign_get_task_reward(
+            session,
+            cookie_header,
+            task.get("taskId"),
+            task_type="30",
+            record_id=task.get("id"),
+        )
+        sleep(1)
+
+
+def sign_query_my_prizes(session, cookie_header=None):
+    print("==== 账户明细 ====")
+    resp = api(
+        session,
+        "POST",
+        "https://act.10010.com/SigninApp/convert/phoneDetails",
+        cookie_header,
+        data={"log_type": "1", "number": "1", "list_num": ""},
+        extra_headers={"origin": "https://img.client.10010.com"},
+    )
+    body = safe_json(resp)
+    if not body or str(body.get("status")) != "0000":
+        return
+    data = (body.get("data") or {}).get("detailedBO", []) or []
+    logged = 0
+    for item in data:
+        if logged >= 5:
+            break
+        remark = item.get("remark", "")
+        buss_name = item.get("from_bussname", "")
+        if "兑换" not in remark and "兑换" not in buss_name:
+            continue
+        if logged == 0:
+            print("  最近兑换记录:")
+        amount = item.get("booksNumber") or item.get("books_number") or "0"
+        print(f"    {item.get('order_time', '')} | {remark} (变动:{amount})")
+        logged += 1
+    if logged == 0:
+        print("  暂无兑换记录")
+
+
+def points_sign(session, cookie_header=None):
+    print("==== SigninApp 积分签到 ====")
+    extra = {
+        "user-agent": SIGNIN_APP_UA,
+        "referer": "https://img.client.10010.com",
+        "origin": "https://img.client.10010.com",
+    }
+
+    def post(path, data=None):
+        return api(
+            session,
+            "POST",
+            f"https://act.10010.com/SigninApp/{path}",
+            cookie_header,
+            data=data or {},
+            extra_headers=extra,
+        )
+
+    res0 = safe_json(post("signin/getIntegral"))
+    if res0 and str(res0.get("status")) == "0000":
+        print(f"  签到前积分: {(res0.get('data') or {}).get('integralTotal')}")
+    res1 = safe_json(post("signin/getContinuous"))
+    sleep(2)
+    today_signed = ""
+    if res1:
+        today_signed = str((res1.get("data") or {}).get("todaySigned", ""))
+    if today_signed == "1":
+        res2 = safe_json(post("signin/daySign"))
+        if res2:
+            print(f"  积分签到: {res2.get('msg') or res2.get('status') or '已请求'}")
+    else:
+        print("  积分签到: 今天已签到")
+    sleep(2)
+    res3 = safe_json(post("signin/bannerAdPlayingLogo"))
+    if res3 and str(res3.get("status")) == "0000":
+        print("  积分翻倍成功")
+    elif res3:
+        print(f"  积分翻倍: {res3.get('msg') or ''}")
+    res4 = safe_json(post("signin/getIntegral"))
+    if res4 and str(res4.get("status")) == "0000":
+        print(f"  签到后积分: {(res4.get('data') or {}).get('integralTotal')}")
+    post("doTask/finishVideo")
+    post("doTask/getTaskInfo")
+    res7 = safe_json(post("doTask/getPrize"))
+    if res7 and str(res7.get("status")) == "0000":
+        print("  1G流量日包领取成功")
+    elif res7:
+        print(f"  1G流量日包: {res7.get('msg') or res7.get('status') or '失败'}")
+
+
+def extra_daily_tasks(session, cookie_header=None):
+    print("==== 娱乐打卡 / 沃之树 / 流量 / 金币抽奖 ====")
+    extra = {
+        "user-agent": SIGNIN_APP_UA,
+        "referer": "https://img.client.10010.com",
+        "origin": "https://img.client.10010.com",
+    }
+    data1 = {"methodType": "signin", "clientVersion": "11.0802", "deviceType": "Android"}
+    res1 = api(
+        session,
+        "POST",
+        "https://m.client.10010.com/producGame_signin",
+        cookie_header,
+        data=data1,
+        extra_headers=extra,
+    )
+    body1 = safe_json(res1)
+    if body1:
+        print(f"  每日打卡: {body1.get('respDesc') or body1.get('msg') or ''}")
+    res5 = api(
+        session,
+        "POST",
+        "https://m.client.10010.com/mactivity/arbordayJson/arbor/3/0/3/grow.htm",
+        cookie_header,
+        extra_headers=extra,
+    )
+    body5 = safe_json(res5)
+    if body5:
+        print(f"  每日浇水: {body5.get('msg') or body5.get('desc') or ''}")
+    print("  看视频/下载APP流量奖励...")
+    for _ in range(3):
+        api(session, "POST", "https://act.10010.com/SigninApp/mySignin/addFlow", cookie_header, data={"stepflag": 22}, extra_headers=extra)
+        sleep(2)
+        api(session, "POST", "https://act.10010.com/SigninApp/mySignin/addFlow", cookie_header, data={"stepflag": 23}, extra_headers=extra)
+    print("  看视频流量任务完成")
+    res7 = api(
+        session,
+        "POST",
+        "https://m.client.10010.com/dailylottery/static/textdl/userLogin",
+        cookie_header,
+        extra_headers=extra,
+    )
+    if res7 is None:
+        print("  金币抽奖: 登录页请求失败")
+        return
+    found = re.findall(r"encryptmobile=(.+?)';", res7.text or "")
+    if not found:
+        print("  金币抽奖: 未拿到 encryptmobile，跳过")
+        return
+    data8 = {"usernumberofjsp": found[0], "flag": "convert"}
+    for _ in range(3):
+        res8 = api(
+            session,
+            "POST",
+            "https://m.client.10010.com/dailylottery/static/doubleball/choujiang",
+            cookie_header,
+            data=data8,
+            extra_headers=extra,
+        )
+        body8 = safe_json(res8)
+        if body8:
+            print(f"  金币抽奖: {body8.get('RspMsg') or body8.get('msg') or ''}")
+        sleep(2)
+
+
+def open_plat_line_new(session, cookie_header, to_url):
+    try:
+        headers = base_headers(cookie_header)
+        resp = session.get(OPENPLAT_URL, params={"to_url": to_url}, headers=headers, allow_redirects=False, timeout=15)
+    except Exception as e:
+        print(f"  openPlatLineNew 异常: {e}")
+        return None
+    loc = resp.headers.get("Location") if resp is not None else None
+    if resp is not None and resp.status_code in (301, 302, 303, 307, 308) and loc:
+        qs = parse_qs(urlparse(loc).query)
+        ticket = (qs.get("ticket") or [""])[0]
+        type_val = (qs.get("type") or [""])[0]
+        if ticket:
+            return {"ticket": ticket, "type": type_val, "loc": loc}
+        print("  openPlatLineNew: 重定向中无 ticket")
+        return None
+    code = resp.status_code if resp is not None else "?"
+    print(f"  openPlatLineNew: 状态码 {code}")
+    return None
+
+
+def get_bizchannelinfo(session, cookie_header, rpt_id=""):
+    cookies = session.cookies.get_dict()
+    cookies.update(parse_cookie_map(cookie_header))
+    info = {
+        "bizChannelCode": "225",
+        "disriBiz": "party",
+        "unionSessionId": "",
+        "stType": "",
+        "stDesmobile": "",
+        "source": "",
+        "rptId": rpt_id,
+        "ticket": "",
+        "tongdunTokenId": cookies.get("TOKENID_COOKIE", ""),
+        "xindunTokenId": cookies.get("UNICOM_TOKENID", ""),
+    }
+    return json.dumps(info, ensure_ascii=False)
+
+
+def get_epay_authinfo(session_id="", token_id="", user_id=""):
+    return json.dumps(
+        {"mobile": "", "sessionId": session_id, "tokenId": token_id, "userId": user_id},
+        ensure_ascii=False,
+    )
+
+
+def ttlxj_task(session, cookie_header=None):
+    print("==== 天天领现金 ====")
+    state = {"sessionId": "", "tokenId": "", "userId": "", "rptId": ""}
+
+    def epay_headers():
+        return {
+            "bizchannelinfo": get_bizchannelinfo(session, cookie_header, state["rptId"]),
+            "authinfo": get_epay_authinfo(state["sessionId"], state["tokenId"], state["userId"]),
+        }
+
+    def authorize(ticket, type_val, referer_url):
+        payload = {
+            "response_type": "rptid",
+            "client_id": "73b138fd-250c-4126-94e2-48cbcc8b9cbe",
+            "redirect_uri": "https://epay.10010.com/ci-mps-st-web/",
+            "login_hint": {
+                "credential_type": "st_ticket",
+                "credential": ticket,
+                "st_type": type_val,
+                "force_logout": True,
+                "source": "app_sjyyt",
+            },
+            "device_info": {
+                "token_id": f"chinaunicom-pro-{int(time.time() * 1000)}-{random_string(13)}",
+                "trace_id": random_string(32),
+            },
+        }
+        headers = base_headers(cookie_header, {"Origin": "https://epay.10010.com", "Referer": referer_url, "content-type": "application/json"})
+        try:
+            res = session.post("https://epay.10010.com/woauth2/v2/authorize", json=payload, headers=headers, timeout=10)
+            return res.status_code == 200
+        except Exception as e:
+            print(f"  天天领现金 authorize 异常: {e}")
+            return False
+
+    def auth_check():
+        headers = base_headers(cookie_header, epay_headers())
+        headers["content-type"] = "application/json"
+        try:
+            res = session.post("https://epay.10010.com/ps-pafs-auth-front/v1/auth/check", headers=headers, json={}, timeout=10)
+            data = res.json()
+        except Exception as e:
+            print(f"  天天领现金 auth_check 异常: {e}")
+            return False
+        code = data.get("code")
+        if code == "0000":
+            auth_info = (data.get("data") or {}).get("authInfo") or {}
+            state["sessionId"] = auth_info.get("sessionId", "")
+            state["tokenId"] = auth_info.get("tokenId", "")
+            state["userId"] = auth_info.get("userId", "")
+            return True
+        if code == "2101000100":
+            login_url = (data.get("data") or {}).get("woauth_login_url")
+            if login_url:
+                return ttlxj_login(login_url)
+        print(f"  天天领现金 AuthCheck 失败[{code}]: {data.get('msg')}")
+        return False
+
+    def ttlxj_login(login_url):
+        full_url = f"{login_url}https://epay.10010.com/ci-mcss-party-web/clockIn/?bizFrom=225&bizChannelCode=225"
+        try:
+            res = session.get(full_url, headers=base_headers(cookie_header), allow_redirects=False, timeout=10)
+        except Exception as e:
+            print(f"  天天领现金 login 异常: {e}")
+            return False
+        loc = res.headers.get("Location") if res is not None else None
+        if res is not None and res.status_code in (301, 302, 303, 307, 308) and loc:
+            rptid = (parse_qs(urlparse(loc).query).get("rptid") or [""])[0]
+            if rptid:
+                state["rptId"] = rptid
+                return auth_check()
+            print("  天天领现金: Login 跳转后无 rptid")
+            return False
+        print(f"  天天领现金: Login 失败[{getattr(res, 'status_code', '?')}]")
+        return False
+
+    def do_tasks():
+        headers = base_headers(cookie_header, epay_headers())
+        headers["content-type"] = "application/json"
+        try:
+            res = session.post(
+                "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/userDrawInfo",
+                json={},
+                headers=headers,
+                timeout=10,
+            )
+            data = res.json()
+        except Exception as e:
+            print(f"  天天领现金 查询异常: {e}")
+            return
+        if data.get("code") != "0000":
+            print(f"  天天领现金: 查询失败: {data.get('msg')}")
+            return
+        day_of_week = (data.get("data") or {}).get("dayOfWeek", "")
+        draw_key = f"day{day_of_week}"
+        if (data.get("data") or {}).get(draw_key) == "1":
+            print("  天天领现金: 今天未打卡")
+            today_js = (datetime.datetime.now().weekday() + 1) % 7
+            draw_type = "C" if today_js == 0 else "B"
+            unify_draw(draw_type)
+        else:
+            print("  天天领现金: 今天已打卡")
+
+    def unify_draw(draw_type):
+        headers = base_headers(cookie_header, epay_headers())
+        req_data = {"drawType": draw_type, "bizFrom": "225", "activityId": "TTLXJ20210330"}
+        try:
+            res = session.post(
+                "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/unifyDrawNew",
+                data=req_data,
+                headers=headers,
+                timeout=10,
+            )
+            data = res.json()
+        except Exception as e:
+            print(f"  天天领现金 抽奖异常: {e}")
+            return
+        if data.get("code") == "0000":
+            prize = (data.get("data") or {}).get("prizeName", "未知奖品")
+            print(f"  天天领现金: 抽奖成功: {prize}")
+        else:
+            print(f"  天天领现金: 抽奖失败: {data.get('msg')}")
+
+    def query_available():
+        headers = base_headers(cookie_header, epay_headers())
+        headers["content-type"] = "application/json"
+        try:
+            res = session.post(
+                "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/queryAvailable",
+                json={},
+                headers=headers,
+                timeout=10,
+            )
+            data = res.json()
+        except Exception as e:
+            print(f"  天天领现金 余额查询异常: {e}")
+            return
+        if data.get("code") != "0000":
+            print(f"  天天领现金: 查询余额失败: {data.get('msg')}")
+            return
+        d = data.get("data") or {}
+        amount_raw = int(d.get("availableAmount", "0") or 0)
+        msg = f"  天天领现金: 可用立减金 {amount_raw / 100:.2f}元"
+        seven_day = int(d.get("sevenDayExpireAmount", 0) or 0)
+        if seven_day > 0:
+            msg += f", 7天内过期 {seven_day / 100:.2f}元"
+        print(msg)
+
+    for attempt in range(1, 4):
+        ticket_res = open_plat_line_new(session, cookie_header, "https://epay.10010.com/ci-mps-st-web/ttlxj/")
+        if not ticket_res or not ticket_res.get("ticket"):
+            print(f"  天天领现金: 获取 ticket 失败 ({attempt}/3)")
+            sleep(2)
+            continue
+        if authorize(ticket_res["ticket"], ticket_res["type"], ticket_res["loc"]) and auth_check():
+            do_tasks()
+            query_available()
+            return
+        print(f"  天天领现金: 授权失败 ({attempt}/3)")
+        sleep(2)
+    print("  天天领现金: 跳过")
+
+
+class TtxcFarm:
+    def __init__(self, session, cookie_header=None):
+        self.session = session
+        self.cookie_header = cookie_header
+        self.token = ""
+        self.user_id = ""
+        self.nick_name = ""
+        self.newbie_list = []
+        self.charge_level = {}
+        self.no_energy = False
+        self.unicom_token_id = session_cookie(session, "UNICOM_TOKENID", cookie_header) or random_string(32)
+
+    def headers(self, auth=True, extra=None):
+        headers = {
+            "User-Agent": TTXC_UA,
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "Origin": "https://epay.10010.com",
+            "Referer": TTXC_REFERER,
+            "X-Requested-With": "com.sinovatech.unicom.ui",
+        }
+        if auth and self.token:
+            headers["Authorization"] = self.token
+        if extra:
+            headers.update(extra)
+        return headers
+
+    def post(self, path, payload=None, auth=True, with_user=True):
+        data = dict(payload or {})
+        if with_user:
+            data.setdefault("userId", self.user_id or "")
+        data.setdefault("channel", TTXC_CHANNEL)
+        try:
+            resp = self.session.post(
+                f"{TTXC_BASE_URL}{path}",
+                json=data,
+                headers=self.headers(auth=auth),
+                timeout=15,
+            )
+            return resp.json()
+        except Exception as e:
+            print(f"  通通乡村 {path} 异常: {e}")
+            return {}
+
+    def finish_woauth(self, login_url):
+        try:
+            res = self.session.get(
+                login_url,
+                headers={"Referer": "https://epay.10010.com/", "User-Agent": TTXC_UA},
+                timeout=15,
+            )
+        except Exception as e:
+            print(f"  通通乡村 woauth 异常: {e}")
+            return False
+        match = re.search(r'var token = "([^"]+)"', res.text or "")
+        if not match:
+            return False
+        next_url = (
+            "https://epay.10010.com/woauth2/after-collected-device-digest"
+            f"?deviceDigestTraceId=&deviceDigestTokenId=&token={quote(match.group(1))}&source=app_sjyyt"
+        )
+        referer = login_url
+        ok = False
+        for _ in range(8):
+            try:
+                r = self.session.get(
+                    next_url,
+                    allow_redirects=False,
+                    headers={"Referer": referer, "User-Agent": TTXC_UA},
+                    timeout=15,
+                )
+            except Exception:
+                return False
+            loc = r.headers.get("Location") or r.headers.get("location")
+            if not loc:
+                ok = r.status_code == 200
+                break
+            if loc.startswith("/"):
+                loc = urljoin(next_url, loc)
+            referer, next_url = next_url, loc
+        ecs = session_cookie(self.session, "ecs_token", self.cookie_header)
+        if ecs:
+            self.session.cookies.set("ecs_token", ecs, domain=".10010.com")
+        return ok
+
+    def init_game(self):
+        ecs = session_cookie(self.session, "ecs_token", self.cookie_header)
+        if not ecs:
+            print("  通通乡村: 缺少 ecs_token，跳过")
+            return False
+        self.session.cookies.set("ecs_token", ecs, domain=".10010.com")
+        url = f"{TTXC_APP_BASE_URL}/v1/login/ttGame?channel={TTXC_CHANNEL}&rptId="
+        last = {}
+        for attempt in range(1, 4):
+            try:
+                res = self.session.post(
+                    url,
+                    json={"unicomTokenId": self.unicom_token_id},
+                    headers=self.headers(auth=False),
+                    timeout=15,
+                )
+                last = res.json() if res is not None else {}
+            except Exception as e:
+                print(f"  通通乡村 init 异常: {e}")
+                last = {}
+            if last.get("code") == "0000":
+                return True
+            if last.get("code") == "4003" and last.get("data"):
+                if self.finish_woauth(last.get("data")):
+                    if any(c.name == "CucaSession" for c in self.session.cookies):
+                        return True
+                    continue
+            if attempt < 3:
+                sleep(2)
+        print(f"  通通乡村初始化失败[{last.get('code')}]: {last.get('msg', '')}")
+        return False
+
+    def login(self):
+        if not self.init_game():
+            return False
+        data = self.post("/user/v1/login", auth=False, with_user=False)
+        if data.get("code") != 0:
+            print(f"  通通乡村登录失败[{data.get('code')}]: {data.get('msg', '')}")
+            return False
+        user = data.get("data") or {}
+        self.user_id = user.get("userId", "")
+        self.token = data.get("token", "")
+        self.charge_level = user.get("chargeLevel") or {}
+        self.newbie_list = user.get("newbieList")
+        self.nick_name = user.get("nickName") or ""
+        if not self.user_id or not self.token:
+            print("  通通乡村登录响应缺少 userId/token")
+            return False
+        carbon = self.charge_level.get("carbonNum", 0)
+        eco = self.charge_level.get("ecologyAmount", 0)
+        print(f"  通通乡村登录成功，碳能量{carbon}g，生态值{eco}")
+        return True
+
+    def newbie_done(self):
+        steps = self.newbie_list
+        if not isinstance(steps, list):
+            return True
+        return all(step in steps for step in TTXC_NEWBIE_STEPS)
+
+    def newbie_need(self, step):
+        return isinstance(self.newbie_list, list) and step not in self.newbie_list
+
+    def newbie_mark(self, step):
+        target = []
+        for item in TTXC_NEWBIE_STEPS:
+            target.append(item)
+            if item == step:
+                break
+        data = self.post("/user/v1/newbie", {"newbieList": target, "type": 1})
+        if data.get("code") == 0:
+            self.newbie_list = data.get("data") or target
+            return True
+        print(f"  新手步骤{step}失败[{data.get('code')}]: {data.get('msg', '')}")
+        return False
+
+    def sign(self):
+        info = self.post("/client/v1/sign/info", {})
+        code = (info.get("data") or {}).get("signinCode")
+        if not code:
+            print("  通通乡村: 获取签到码失败")
+            return
+        user = self.post("/client/v1/sign/user", {"code": code})
+        last_time = str((user.get("data") or {}).get("lastSigninTime") or "")
+        if last_time[:10] == datetime.datetime.now().strftime("%Y-%m-%d"):
+            print("  通通乡村: 今日已签到")
+            return
+        data = self.post("/client/v1/sign/signIn", {"code": code})
+        if data.get("code") == 0:
+            print("  通通乡村: 签到成功")
+        else:
+            print(f"  通通乡村签到失败[{data.get('code')}]: {data.get('msg', '')}")
+
+    def get_tasks(self):
+        data = self.post("/client/v1/task/list", {})
+        if data.get("code") != 0:
+            print(f"  通通乡村任务列表失败[{data.get('code')}]: {data.get('msg', '')}")
+            return []
+        tasks = []
+        for group in data.get("data") or []:
+            for task in group.get("taskList") or []:
+                task["taskGroupName"] = group.get("taskGroupName", "")
+                tasks.append(task)
+        return tasks
+
+    def finish_task(self, task):
+        task_id = task.get("taskCode")
+        if not task_id:
+            return False
+        data = self.post("/client/v1/task/finish", {"taskId": task_id})
+        name = task.get("taskTitle", task_id)
+        if data.get("code") == 0:
+            reward = task.get("carbonEnergyAmount") or 0
+            print(f"  领取[{name}]成功 +{reward}g")
+            return True
+        print(f"  领取[{name}]失败[{data.get('code')}]: {data.get('msg', '')}")
+        return False
+
+    def do_task(self, task):
+        data = self.post("/client/v1/task/do", {"taskId": task.get("taskCode")})
+        name = task.get("taskTitle", task.get("taskCode", ""))
+        if data.get("code") == 0:
+            print(f"  已执行[{name}]")
+            return True
+        print(f"  执行[{name}]失败[{data.get('code')}]: {data.get('msg', '')}")
+        return False
+
+    def claim_ready(self, tasks, claimed):
+        count = 0
+        for task in tasks:
+            task_id = task.get("taskCode")
+            if task.get("taskStatus") == "UNCLA" and task_id not in claimed:
+                if self.finish_task(task):
+                    claimed.add(task_id)
+                    count += 1
+        return count
+
+    def do_jump_tasks(self, tasks):
+        count = 0
+        for task in tasks:
+            if task.get("taskType") == "GAME" and task.get("taskStatus") == "UNDO" and task.get("jumpUrl"):
+                if self.do_task(task):
+                    count += 1
+                sleep(1)
+        return count
+
+    def do_garbage(self, tasks):
+        task = next(
+            (
+                t
+                for t in tasks
+                if t.get("taskType") == "GAME"
+                and t.get("taskStatus") == "UNDO"
+                and "垃圾分类" in t.get("taskTitle", "")
+            ),
+            None,
+        )
+        if not task:
+            return False
+        start = self.post("/user/v1/start", {})
+        answer_no = (start.get("data") or {}).get("answerNo")
+        if not answer_no:
+            print("  垃圾分类开始失败")
+            return False
+        sleep(TTXC_GARBAGE_WAIT)
+        data = self.post("/user/v1/finish", {"answerNo": answer_no})
+        if data.get("code") == 0:
+            print("  垃圾分类已通关")
+            return True
+        print(f"  垃圾分类失败[{data.get('code')}]: {data.get('msg', '')}")
+        return False
+
+    def get_lands(self):
+        land = safe_int((self.charge_level or {}).get("land"), 4)
+        data = self.post("/plant/v1/user", {"land": land})
+        if data.get("code") != 0:
+            print(f"  获取土地失败[{data.get('code')}]: {data.get('msg', '')}")
+            return []
+        return data.get("data") or []
+
+    def get_plant_id(self):
+        data = self.post("/client/v1/plant/page", {"itemType": "SPE", "pageNum": 1, "pageSize": 20})
+        items = (data.get("data") or {}).get("list") or []
+        return items[0].get("itemNo", "") if items else ""
+
+    def plant_land(self, land_index, plant_id=None):
+        plant_id = plant_id or self.get_plant_id()
+        if not plant_id or not land_index:
+            return None
+        buy = self.post("/client/v1/plant/buy", {"plantId": plant_id, "gameCfgId": ""})
+        if buy.get("code") != 0:
+            print(f"  购买种子失败[{buy.get('code')}]: {buy.get('msg', '')}")
+            return None
+        data = self.post("/plant/v1/planting", {"landIndex": land_index, "plantId": plant_id})
+        if data.get("code") == 0:
+            print(f"  已在地块{land_index}种植")
+            return {"landIndex": land_index, "status": 3, "plant": {"plantId": plant_id}}
+        print(f"  地块{land_index}种植失败[{data.get('code')}]: {data.get('msg', '')}")
+        return None
+
+    def ensure_planted(self, lands):
+        active = [l for l in lands if l.get("status") in [2, 3] and (l.get("plant") or {}).get("plantId")]
+        empty = [l for l in lands if l.get("status") == 1]
+        if not empty:
+            return active
+        plant_id = self.get_plant_id()
+        if not plant_id:
+            return active
+        for land in empty[:2]:
+            planted = self.plant_land(land.get("landIndex"), plant_id)
+            if planted:
+                active.append(planted)
+        return active
+
+    def charge_land(self, land, mock=None):
+        if not land:
+            return None
+        plant = land.get("plant") or {}
+        plant_id, land_index = plant.get("plantId"), land.get("landIndex")
+        if not plant_id or not land_index:
+            return None
+        payload = {"landIndex": land_index, "plantId": plant_id}
+        if mock is not None:
+            payload["mock"] = mock
+        data = self.post("/plant/v1/charge", payload)
+        if data.get("code") == 0:
+            print(f"  地块{land_index}充能成功")
+            result = data.get("data") or {}
+            if result and not result.get("plant"):
+                result["plant"] = plant
+            return result or land
+        print(f"  地块{land_index}充能失败[{data.get('code')}]: {data.get('msg', '')}")
+        if "余额不足" in str(data.get("msg", "")):
+            self.no_energy = True
+        return None
+
+    def harvest_land(self, land, newbie=False):
+        if not land:
+            return None
+        plant = land.get("plant") or {}
+        plant_id, land_index = plant.get("plantId"), land.get("landIndex")
+        if not plant_id or not land_index:
+            return None
+        if land.get("status") == 2 and TTXC_HARVEST_WAIT > 0:
+            sleep(TTXC_HARVEST_WAIT)
+        path = "/plant/v1/newHarvest" if newbie else "/plant/v1/harvest"
+        data = self.post(path, {"landIndex": land_index, "plantId": plant_id})
+        if data.get("code") == 0:
+            print(f"  地块{land_index}收获成功")
+            return data.get("data") or {"landIndex": land_index, "status": 1, "plant": None}
+        print(f"  地块{land_index}收获失败[{data.get('code')}]: {data.get('msg', '')}")
+        return None
+
+    def harvest_and_replant(self, land):
+        harvested = self.harvest_land(land)
+        if harvested and land:
+            return self.plant_land(land.get("landIndex"))
+        return None
+
+    def farm_tasks(self, tasks):
+        charge_task = next((t for t in tasks if "10次作物充能" in t.get("taskTitle", "")), None)
+        harvest_task = next((t for t in tasks if "收获一次作物" in t.get("taskTitle", "")), None)
+        charge_pending = charge_task if (charge_task or {}).get("taskStatus") == "UNDO" else None
+        harvest_pending = harvest_task if (harvest_task or {}).get("taskStatus") == "UNDO" else None
+        if not charge_pending and not harvest_pending:
+            return
+        lands = self.get_lands()
+        active = self.ensure_planted(lands)
+        if harvest_pending:
+            for land in active:
+                if land.get("status") == 2:
+                    self.harvest_and_replant(land)
+        if not active:
+            print("  没有可充能作物")
+            return
+        need = min(safe_int((charge_pending or {}).get("finishValue")) - safe_int((charge_pending or {}).get("doneValue")), TTXC_GROW_MAX)
+        charged = 0
+        for land in active:
+            if self.no_energy or charged >= max(need, 1):
+                break
+            if land.get("status") == 3 and (land.get("plant") or {}).get("plantId"):
+                result = self.charge_land(land)
+                if result:
+                    charged += 1
+                    sleep(1)
+
+    def run(self):
+        print("==== 通通乡村 ====")
+        if not self.login():
+            return False
+        claimed = set()
+        self.sign()
+        tasks = self.get_tasks()
+        self.claim_ready(tasks, claimed)
+        self.do_jump_tasks(tasks)
+        self.do_garbage(tasks)
+        self.farm_tasks(tasks)
+        tasks = self.get_tasks()
+        self.claim_ready(tasks, claimed)
+        return True
+
+
+def ttxc_task(session, cookie_header=None):
+    TtxcFarm(session, cookie_header).run()
+
+
+def run_all(session, cookie_header=None, mobile="", grab_only=False):
+    if cookie_header:
+        apply_cookie(session, cookie_header)
+    if not mobile:
+        mobile = session.cookies.get("c_mobile") or cookie_get(cookie_header, "c_mobile") or ""
+    if grab_only or is_weekly_grab_window():
+        ok = sign_grab_coupon(session, cookie_header, amount="10", wait=True)
+        return ok, "抢兑"
+    ctx = {}
+    ok, msg = sign_get_continuous(session, cookie_header)
+    sign_claim_signin_rewards(session, cookie_header)
+    sign_get_telephone(session, cookie_header, is_initial=True, ctx=ctx)
+    sign_month_sign_gift(session, cookie_header)
+    sign_get_task_list(session, cookie_header, mobile=mobile)
+    sign_claim_signin_rewards(session, cookie_header)
+    points_sign(session, cookie_header)
+    extra_daily_tasks(session, cookie_header)
+    ttlxj_task(session, cookie_header)
+    ttxc_task(session, cookie_header)
+    sign_get_telephone(session, cookie_header, is_initial=False, ctx=ctx)
+    sign_query_my_prizes(session, cookie_header)
+    return ok, msg
+
+
+def main():
+    load_dotenv()
+    grab_only = (os.getenv("UNICOM_GRAB_ONLY") or "").strip() in ("1", "true", "True") or "--grab" in sys.argv
+    token_raw = (os.getenv("UNICOM_TOKEN") or "").strip()
+    cookie = (os.getenv("UNICOM_COOKIE") or "").strip()
+    accounts = load_accounts(os.getenv("UNICOM_ACCOUNT"))
+    tokens = load_tokens(token_raw)
+    if grab_only:
+        print("模式: 仅抢兑 10 元话费券")
+
+    if not cookie and not accounts and not tokens:
+        print("未获取到变量 UNICOM_TOKEN / UNICOM_COOKIE / UNICOM_ACCOUNT")
+        print("  UNICOM_TOKEN=token_online[#appId]")
+        print("  UNICOM_COOKIE=完整Cookie")
+        print("  UNICOM_ACCOUNT=手机号#APP登录密码[#appId]")
+        return 0
+
+    ok_count = 0
+
+    if tokens:
+        print(f"中国联通签到（token_online 模式）：共 {len(tokens)} 个 token")
+        for idx, (token, appid) in enumerate(tokens, start=1):
+            print(f"\n======== 第 {idx} 个 token ========")
+            session = requests.Session()
+            seed_device_cookies(session, token, appid)
+            ok, msg = online(session, token, appid)
+            print(">>>在线登录：", msg)
+            if not ok:
+                continue
+            ok, _ = run_all(session, grab_only=grab_only)
+            ok_count += 1 if ok else 0
+            sleep(2)
+    elif cookie:
+        print("中国联通签到（Cookie 模式）")
+        session = requests.Session()
+        ok, _ = run_all(session, cookie_header=cookie, grab_only=grab_only)
+        ok_count += 1 if ok else 0
+    else:
+        print(f"中国联通签到（密码模式）：共 {len(accounts)} 个账号")
+        for idx, (phone, password, appid) in enumerate(accounts, start=1):
+            masked = phone[:3] + "****" + phone[-4:] if len(phone) >= 7 else phone
+            print(f"\n======== 第 {idx} 个账号 {masked} ========")
+            session = requests.Session()
+            logged, msg, token = login(session, phone, password, appid)
+            print(">>>登录：", msg)
+            if not logged:
+                if "短信验证码" in msg:
+                    print("  联通触发短信验证码风控，密码登录不可用。")
+                    print("  请改用 UNICOM_TOKEN=token_online 或 UNICOM_COOKIE。")
+                continue
+            ok, msg = online(session, token, appid)
+            print(">>>在线登录：", msg)
+            if not ok:
+                continue
+            ok, _ = run_all(session, mobile=phone, grab_only=grab_only)
+            ok_count += 1 if ok else 0
+            sleep(2)
+
+    print(f"\n完成：成功 {ok_count} 项")
+    return 0 if ok_count else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

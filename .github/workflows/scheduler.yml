@@ -1,10 +1,13 @@
 name: 呆呆面板 · 定时任务调度
 
+# 注意：GitHub Actions 的 cron 使用 UTC，且免费 runner 常有几分钟延迟。
+# 因此这里按触发时间显式指定任务 ID（runner.py --task N），而不是用 --due 比对当前分钟，
+# 避免因延迟错过触发窗口。北京时间 = UTC + 8。
 on:
   schedule:
-    - cron: "0 1 * * *"
-    - cron: "0 4 * * *"
-    - cron: "*/30 * * * *"
+    - cron: "0 17 * * *"
+    - cron: "0 2 * * *"
+    - cron: "10 4 * * *"
   workflow_dispatch:
     inputs:
       task_id:
@@ -24,16 +27,38 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run tasks
         env:
+          ydyp: ${{ secrets.YDYP }}
+          UNICOM_ACCOUNT: ${{ secrets.UNICOM_ACCOUNT }}
+          UNICOM_COOKIE: ${{ secrets.UNICOM_COOKIE }}
           TASK_ID: ${{ github.event.inputs.task_id }}
+          SCHEDULE: ${{ github.event.schedule }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ -n "$TASK_ID" ]; then
-            python3 runner.py --task "$TASK_ID"
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            python3 runner.py
-          else
-            python3 runner.py --due
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "$TASK_ID" ]; then
+              python3 runner.py --task "$TASK_ID"
+            else
+              python3 runner.py
+            fi
+            exit 0
           fi
+          case "$SCHEDULE" in
+            "0 17 * * *")
+              # 北京 01:00 -> 移动云盘
+              python3 runner.py --task 1
+              ;;
+            "0 2 * * *")
+              # 北京 10:00 -> 移动云盘；周一同时抢兑话费券
+              python3 runner.py --task 1
+              if [ "$(TZ=Asia/Shanghai date +%u)" = "1" ]; then
+                python3 runner.py --task 3
+              fi
+              ;;
+            "10 4 * * *")
+              # 北京 12:10 -> 联通营业厅签到
+              python3 runner.py --task 2
+              ;;
+          esac
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

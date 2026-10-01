@@ -2,6 +2,7 @@
 """呆呆面板任务调度：cron 匹配、脚本执行、日志与历史。"""
 
 import json
+import os
 import subprocess
 import time
 from datetime import datetime, timezone, timedelta
@@ -16,35 +17,35 @@ TZ = timezone(timedelta(hours=8))
 
 SCRIPTS_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+ENV_FILE = BASE_DIR / ".env"
+
+
+def load_dotenv():
+    if not ENV_FILE.exists():
+        return
+    for raw in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv()
 
 DEFAULT_CONFIG = {
     "tasks": [
         {
             "id": 1,
-            "name": "每日AI新闻早报",
-            "script": "ai_news.py",
-            "cron": "0 9 * * *",
+            "name": "移动云盘",
+            "script": "mcloud.py",
+            "cron": "5 12 * * *",
             "tz": "Asia/Shanghai",
             "enabled": True,
-            "desc": "每天早上9点搜索AI行业新闻并生成报告",
-        },
-        {
-            "id": 2,
-            "name": "GitHub Trending 监控",
-            "script": "github_trending.py",
-            "cron": "0 12 * * *",
-            "tz": "Asia/Shanghai",
-            "enabled": True,
-            "desc": "每天中午12点抓取GitHub热门项目",
-        },
-        {
-            "id": 3,
-            "name": "系统健康检查",
-            "script": "health_check.py",
-            "cron": "*/30 * * * *",
-            "tz": "Asia/Shanghai",
-            "enabled": True,
-            "desc": "每30分钟执行一次环境健康检查",
+            "desc": "hlt1995 · 环境变量 ydyp",
         },
     ]
 }
@@ -203,6 +204,17 @@ def due_tasks(dt=None):
     return due
 
 
+def _script_cmd(script_path):
+    suffix = script_path.suffix.lower()
+    if suffix == ".py":
+        return ["python3", "-u", str(script_path)]
+    if suffix == ".js":
+        return ["node", str(script_path)]
+    if suffix == ".sh":
+        return ["bash", str(script_path)]
+    return None
+
+
 def run_task(task):
     task_id = task["id"]
     name = task["name"]
@@ -223,14 +235,30 @@ def run_task(task):
         )
         return {"task_id": task_id, "name": name, "status": "failed", "error": error_msg, "log": log_file.name}
 
+    cmd = _script_cmd(script_path)
+    if not cmd:
+        error_msg = f"[ERROR] 不支持的脚本类型: {script}"
+        print(error_msg)
+        log_file.write_text(
+            f"任务: {name}\n时间: {timestamp}\n状态: FAILED\n\n{error_msg}\n",
+            encoding="utf-8",
+        )
+        return {"task_id": task_id, "name": name, "status": "failed", "error": error_msg, "log": log_file.name}
+
     try:
         start = time.time()
+        env = os.environ.copy()
+        node_path = env.get("NODE_PATH", "")
+        extra = "/usr/local/lib/node_modules"
+        env["NODE_PATH"] = extra if not node_path else extra + os.pathsep + node_path
+        env["PYTHONPATH"] = str(SCRIPTS_DIR)
         result = subprocess.run(
-            ["python3", "-u", str(script_path)],
+            cmd,
             capture_output=True,
             text=True,
-            timeout=300,
-            cwd=str(BASE_DIR),
+            timeout=480,
+            cwd=str(SCRIPTS_DIR),
+            env=env,
         )
         elapsed = time.time() - start
         status = "success" if result.returncode == 0 else "failed"
@@ -257,7 +285,7 @@ def run_task(task):
             "errors": errors[:500],
         }
     except subprocess.TimeoutExpired:
-        error_msg = "脚本执行超时 (300s)"
+        error_msg = "脚本执行超时 (480s)"
         print(f"  {error_msg}")
         log_file.write_text(
             f"任务: {name}\n时间: {timestamp}\n状态: TIMEOUT\n\n{error_msg}\n",

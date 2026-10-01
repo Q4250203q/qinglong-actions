@@ -10,7 +10,7 @@
 - 网页面板：任务列表、手动执行、启停、日志
 - cron 本地轮询（面板进程内每 20 秒检查到期任务）
 - 脚本执行、日志归档、最近 50 条历史
-- 内置任务：AI 新闻早报、GitHub 热门、健康检查
+- 当前任务：移动云盘签到
 
 ## 启动
 
@@ -29,13 +29,29 @@ python3 runner.py --task 3
 python3 runner.py --due
 ```
 
-## 内置任务
+## 当前任务
 
 | ID | 任务 | cron（北京时间） | 脚本 |
 |----|------|------------------|------|
-| 1 | 每日AI新闻早报 | `0 9 * * *` | `scripts/ai_news.py` |
-| 2 | GitHub Trending 监控 | `0 12 * * *` | `scripts/github_trending.py` |
-| 3 | 系统健康检查 | `*/30 * * * *` | `scripts/health_check.py` |
+| 1 | 移动云盘 | `0 1,10 * * *` | `scripts/mcloud.py` |
+| 2 | 联通营业厅签到 | `10 12 * * *` | `scripts/unicom_sign.py` |
+| 3 | 联通每周抢兑 10 元话费券 | `0 10 * * 1` | `scripts/unicom_grab.py` |
+
+把 `ydyp`、`UNICOM_ACCOUNT`、`UNICOM_COOKIE` 填到 `.env`（参考 `.env.example`）后再执行。
+
+## GitHub Actions 定时
+
+`.github/workflows/scheduler.yml` 会在仓库上定时跑（GitHub cron 为 UTC）：
+
+| 触发（UTC） | 触发（北京） | 执行 |
+|-------------|--------------|------|
+| `0 17 * * *` | 01:00 | 任务 1 移动云盘 |
+| `0 2 * * *` | 10:00 | 任务 1；周一追加任务 3 抢兑 |
+| `10 4 * * *` | 12:10 | 任务 2 联通签到 |
+
+需在仓库 `Settings → Secrets and variables → Actions` 配置 `YDYP`、`UNICOM_ACCOUNT`、`UNICOM_COOKIE`。
+
+注意：仓库连续 60 天无提交，GitHub 会自动暂停定时工作流。
 
 ## 添加任务
 

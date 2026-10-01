@@ -38,6 +38,7 @@ h1 { margin: 0; font-size: 20px; letter-spacing: .08em; }
 }
 .btn.primary { background: linear-gradient(90deg, #134e4a, #7c4a1e); border-color: transparent; }
 .btn.ghost { background: transparent; }
+.btn.danger { background: transparent; border-color: rgba(248,113,113,.35); color: var(--fail); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .layout { padding: 22px 28px 40px; display: grid; gap: 18px; }
 .ops { display: grid; grid-template-columns: 1.2fr 1.2fr .9fr; gap: 14px; }
@@ -87,6 +88,14 @@ h1 { margin: 0; font-size: 20px; letter-spacing: .08em; }
 .add-form input[type="file"] { grid-column: 1 / -1; }
 .check { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
+.scripts-head { margin-top: 16px; }
+.script-list { display: grid; gap: 8px; }
+.script-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center;
+  background: #101722; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+}
+.script-row h5 { margin: 0; font-size: 13px; }
+.script-row p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .timeline { display: grid; gap: 8px; max-height: 220px; overflow: auto; }
 .tl {
   display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: start;

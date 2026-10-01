@@ -6,3 +6,5 @@ logs/*.log
 logs/*.json
 !logs/.gitkeep
 .DS_Store
+.env
+node_modules/

@@ -2,30 +2,30 @@
   "tasks": [
     {
       "id": 1,
-      "name": "每日AI新闻早报",
-      "script": "ai_news.py",
-      "cron": "0 9 * * *",
+      "name": "移动云盘",
+      "script": "mcloud.py",
+      "cron": "0 1,10 * * *",
       "tz": "Asia/Shanghai",
       "enabled": true,
-      "desc": "每天北京时间 09:00 搜索 AI 行业新闻并生成报告"
+      "desc": "hlt1995 · 环境变量 ydyp"
     },
     {
       "id": 2,
-      "name": "GitHub Trending 监控",
-      "script": "github_trending.py",
-      "cron": "0 12 * * *",
+      "name": "联通营业厅签到",
+      "script": "unicom_sign.py",
+      "cron": "10 12 * * *",
       "tz": "Asia/Shanghai",
       "enabled": true,
-      "desc": "每天北京时间 12:00 抓取 GitHub 热门项目"
+      "desc": "环境变量 UNICOM_ACCOUNT=手机号#APP登录密码[#appId] 或 UNICOM_COOKIE"
     },
     {
       "id": 3,
-      "name": "系统健康检查",
-      "script": "health_check.py",
-      "cron": "*/30 * * * *",
+      "name": "联通每周抢兑10元话费券",
+      "script": "unicom_grab.py",
+      "cron": "0 10 * * 1",
       "tz": "Asia/Shanghai",
       "enabled": true,
-      "desc": "每 30 分钟执行一次环境健康检查"
+      "desc": "每周一 10:00 抢兑 10 元话费券（UNICOM_COOKIE）"
     }
   ]
 }

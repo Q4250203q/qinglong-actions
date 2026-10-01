@@ -61,14 +61,19 @@
         </div>
         <div id="task-list" class="task-list"></div>
         <form id="upload-form" class="add-form upload-form">
-          <input name="file" type="file" accept=".py,text/x-python" required />
+          <input name="file" type="file" accept=".py,.js,.sh,text/x-python,text/javascript,application/x-sh" required />
           <input name="name" placeholder="任务名（可空，默认文件名）" />
           <input name="cron" placeholder="cron 例如 0 9 * * *" />
           <input name="desc" placeholder="备注" />
           <label class="check"><input type="checkbox" name="add_task" checked /> 上传后加入看板</label>
           <button type="submit" class="btn primary">上传脚本</button>
         </form>
-        <p class="hint">只接受 UTF-8 的 .py，保存到 scripts/，单文件不超过 200KB。</p>
+        <p class="hint">接受 UTF-8 的 .py / .js / .sh，保存到 scripts/，单文件不超过 200KB。移动云盘凭据填 .env 的 ydyp。看板删除可顺带删文件；下方脚本柜可单独清未挂任务的脚本。</p>
+        <div class="panel-head scripts-head">
+          <h3>脚本柜</h3>
+          <span id="script-count" class="badge">0</span>
+        </div>
+        <div id="script-list" class="script-list"></div>
       </div>
 
       <div class="side">

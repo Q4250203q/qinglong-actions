@@ -236,15 +236,76 @@ def api_history():
     return jsonify(load_history()[-20:][::-1])
 
 
+ALLOWED_SCRIPT_EXT = {".py", ".js", ".sh"}
+PROTECTED_SCRIPTS = {"notify.py", "sendNotify.js"}
+
+
 def _safe_script_name(name):
     name = Path(name or "").name.strip()
-    if not name.endswith(".py"):
+    suffix = Path(name).suffix.lower()
+    if suffix not in ALLOWED_SCRIPT_EXT:
         return None
     if "/" in name or "\\" in name or ".." in name:
         return None
-    if not name.replace(".py", "").replace("_", "").replace("-", "").isalnum():
+    stem = Path(name).stem.replace("_", "").replace("-", "")
+    if not stem.isalnum():
         return None
     return name
+
+
+def list_scripts():
+    used = {}
+    for task in load_config().get("tasks", []):
+        script = task.get("script")
+        if not script:
+            continue
+        used.setdefault(script, []).append({"id": task["id"], "name": task["name"]})
+    items = []
+    if not SCRIPTS_DIR.exists():
+        return items
+    for path in sorted(SCRIPTS_DIR.iterdir(), key=lambda p: p.name.lower()):
+        if not path.is_file() or path.suffix.lower() not in ALLOWED_SCRIPT_EXT:
+            continue
+        name = path.name
+        items.append({
+            "name": name,
+            "size": path.stat().st_size,
+            "mtime": datetime.fromtimestamp(path.stat().st_mtime, TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            "protected": name in PROTECTED_SCRIPTS,
+            "tasks": used.get(name, []),
+        })
+    return items
+
+
+def _script_path(name):
+    safe = _safe_script_name(name)
+    if not safe:
+        return None, ("脚本名不合法", 400)
+    path = (SCRIPTS_DIR / safe).resolve()
+    if path.parent != SCRIPTS_DIR.resolve():
+        return None, ("非法路径", 400)
+    return path, None
+
+
+def _delete_script_file(name):
+    path, err = _script_path(name)
+    if err:
+        return None, err
+    if path.name in PROTECTED_SCRIPTS:
+        return None, ("公共依赖不能删除", 400)
+    if not path.exists() or not path.is_file():
+        return None, ("脚本不存在", 404)
+    path.unlink()
+    return path.name, None
+
+
+def _remove_tasks_by_script(script_name):
+    config = load_config()
+    removed = [t for t in config["tasks"] if t.get("script") == script_name]
+    if removed:
+        config["tasks"] = [t for t in config["tasks"] if t.get("script") != script_name]
+        save_config(config)
+    return removed
 
 
 def _add_task(name, script, cron, desc):
@@ -278,10 +339,10 @@ def _add_task(name, script, cron, desc):
 def api_upload_script():
     file = request.files.get("file")
     if not file or not file.filename:
-        return jsonify({"ok": False, "error": "请选择 .py 文件"}), 400
+        return jsonify({"ok": False, "error": "请选择 .py / .js / .sh 文件"}), 400
     name = _safe_script_name(file.filename)
     if not name:
-        return jsonify({"ok": False, "error": "只接受字母数字下划线的 .py 文件"}), 400
+        return jsonify({"ok": False, "error": "只接受字母数字下划线的 .py / .js / .sh 文件"}), 400
     data = file.read()
     if len(data) > 200_000:
         return jsonify({"ok": False, "error": "脚本不能超过 200KB"}), 400
@@ -304,6 +365,54 @@ def api_upload_script():
         if err:
             return jsonify({"ok": False, "error": err[0], "script": name}), err[1]
     return jsonify({"ok": True, "script": name, "task": task})
+
+
+@app.get("/api/scripts")
+def api_list_scripts():
+    return jsonify(list_scripts())
+
+
+@app.delete("/api/scripts/<path:name>")
+def api_delete_script(name):
+    deleted, err = _delete_script_file(name)
+    if err:
+        return jsonify({"ok": False, "error": err[0]}), err[1]
+    removed = _remove_tasks_by_script(deleted)
+    return jsonify({
+        "ok": True,
+        "script": deleted,
+        "removed_tasks": [{"id": t["id"], "name": t["name"]} for t in removed],
+    })
+
+
+@app.delete("/api/tasks/<int:task_id>")
+def api_delete_task(task_id):
+    config = load_config()
+    task = next((t for t in config["tasks"] if t["id"] == task_id), None)
+    if not task:
+        return jsonify({"ok": False, "error": "任务不存在"}), 404
+    delete_file = (request.args.get("delete_file") or "").lower() in {"1", "true", "yes"}
+    script_name = task.get("script")
+    config["tasks"] = [t for t in config["tasks"] if t["id"] != task_id]
+    save_config(config)
+    script_deleted = None
+    still_used = any(t.get("script") == script_name for t in config["tasks"])
+    if delete_file and script_name and not still_used:
+        script_deleted, err = _delete_script_file(script_name)
+        if err and err[1] != 404:
+            return jsonify({
+                "ok": True,
+                "task": task,
+                "script": script_name,
+                "script_deleted": False,
+                "warning": err[0],
+            })
+    return jsonify({
+        "ok": True,
+        "task": task,
+        "script": script_name,
+        "script_deleted": bool(script_deleted),
+    })
 
 
 @app.post("/api/tasks")

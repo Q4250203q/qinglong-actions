@@ -64,6 +64,7 @@ function renderTasks(tasks, busy) {
         <button class="btn" data-run="${t.id}" ${busy ? "disabled" : ""}>执行</button>
         <button class="btn ghost" data-toggle="${t.id}">切换</button>
         ${last.log ? `<button class="btn ghost" data-log="${escapeHtml(last.log)}">看日志</button>` : ""}
+        <button class="btn danger" data-delete="${t.id}" data-name="${escapeHtml(t.name)}" data-script="${escapeHtml(t.script)}">删除</button>
       </div>
     </article>`;
   }).join("");
@@ -91,6 +92,64 @@ function renderTasks(tasks, busy) {
     btn.onclick = () => {
       $("log-select").value = btn.dataset.log;
       openLog(btn.dataset.log);
+    };
+  });
+  box.querySelectorAll("[data-delete]").forEach((btn) => {
+    btn.onclick = async () => {
+      const name = btn.dataset.name;
+      const script = btn.dataset.script;
+      if (!confirm(`从看板删除「${name}」？`)) return;
+      const alsoFile = confirm(`同时删除脚本文件 ${script}？\n公共依赖不会删。取消则只下看板。`);
+      try {
+        const qs = alsoFile ? "?delete_file=1" : "";
+        await j(`/api/tasks/${btn.dataset.delete}${qs}`, { method: "DELETE" });
+        $("line-yyb").textContent = alsoFile
+          ? `已删除任务「${name}」，并尝试移除 ${script}。`
+          : `已从看板删除「${name}」。`;
+        $("line-shaniu").textContent = "删干净了。柜子里空出一格。";
+        refresh();
+      } catch (err) {
+        $("line-yyb").textContent = err.message;
+      }
+    };
+  });
+}
+
+function renderScripts(scripts) {
+  const box = $("script-list");
+  const badge = $("script-count");
+  if (badge) badge.textContent = String((scripts || []).length);
+  if (!scripts.length) {
+    box.innerHTML = '<p class="empty">scripts/ 里还没有脚本。</p>';
+    return;
+  }
+  box.innerHTML = scripts.map((s) => {
+    const used = (s.tasks || []).map((t) => t.name).join("、") || "未挂看板";
+    const locked = s.protected;
+    return `
+    <article class="script-row">
+      <div>
+        <h5>${escapeHtml(s.name)}</h5>
+        <p>${escapeHtml(used)} · ${escapeHtml(String(s.size))}B · ${escapeHtml(s.mtime)}</p>
+      </div>
+      <button class="btn danger" data-del-script="${escapeHtml(s.name)}" ${locked ? "disabled" : ""}>${locked ? "保护" : "删除脚本"}</button>
+    </article>`;
+  }).join("");
+  box.querySelectorAll("[data-del-script]").forEach((btn) => {
+    btn.onclick = async () => {
+      const name = btn.dataset.delScript;
+      if (!confirm(`删除脚本 ${name}？挂在它上面的看板任务会一起下掉。`)) return;
+      try {
+        const data = await j(`/api/scripts/${encodeURIComponent(name)}`, { method: "DELETE" });
+        const n = (data.removed_tasks || []).length;
+        $("line-yyb").textContent = n
+          ? `已删除 ${name}，并下掉 ${n} 条看板任务。`
+          : `已删除脚本 ${name}。`;
+        $("line-shaniu").textContent = "柜子清出一格。需要再传随时喊我。";
+        refresh();
+      } catch (err) {
+        $("line-yyb").textContent = err.message;
+      }
     };
   });
 }
@@ -161,6 +220,8 @@ async function refresh() {
     $("btn-all").disabled = ov.busy;
     const tasks = await j("/api/tasks");
     renderTasks(tasks, ov.busy);
+    const scripts = await j("/api/scripts");
+    renderScripts(scripts);
     const history = await j("/api/history");
     renderTimeline(history);
     await loadLogs(true);
