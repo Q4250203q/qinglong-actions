@@ -39,6 +39,37 @@ python3 runner.py --due
 
 把 `ydyp`、`UNICOM_ACCOUNT`、`UNICOM_COOKIE` 填到 `.env`（参考 `.env.example`）后再执行。
 
+## 拉库（青龙 / 呆呆面板）
+
+仓库：`https://github.com/Q4250203q/qinglong-actions.git`
+
+青龙订阅命令（只拉 `scripts/` 下的签到脚本，`notify.py` 当依赖）：
+
+```
+ql repo https://github.com/Q4250203q/qinglong-actions.git "mcloud|unicom" "" "notify" "master" "scripts"
+```
+
+等价拆开：
+
+| 参数 | 值 |
+|------|-----|
+| 仓库地址 | `https://github.com/Q4250203q/qinglong-actions.git` |
+| 白名单 | `mcloud\|unicom` |
+| 黑名单 | （空） |
+| 依赖文件 | `notify` |
+| 分支 | `master` |
+| 脚本目录 | `scripts` |
+
+拉到的任务（脚本头已写 cron / Env 名）：
+
+| 脚本 | 任务名 | cron |
+|------|--------|------|
+| `mcloud.py` | 移动云盘 | `0 1,10 * * *` |
+| `unicom_sign.py` | 联通营业厅签到 | `10 12 * * *` |
+| `unicom_grab.py` | 联通每周抢兑10元话费券 | `0 10 * * 1` |
+
+环境变量：`ydyp`、`UNICOM_COOKIE`（优先）或 `UNICOM_ACCOUNT`。
+
 ## GitHub Actions 定时
 
 `.github/workflows/scheduler.yml` 会在仓库上定时跑（GitHub cron 为 UTC）：
