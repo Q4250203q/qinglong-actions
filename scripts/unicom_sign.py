@@ -5,21 +5,23 @@
 
 认证方式优先级（放 .env，任选其一即可）：
 
-  1) UNICOM_TOKEN=token_online[#appId]
-  2) UNICOM_COOKIE=完整 Cookie
-  3) UNICOM_ACCOUNT=手机号#登录密码[#appId]
+  1) UNICOM_TOKEN=token_online[#appId][#YYYY-MM-DD]
+  2) UNICOM_COOKIE=完整 Cookie[#YYYY-MM-DD]
+  3) UNICOM_ACCOUNT=手机号#登录密码[#appId][#YYYY-MM-DD]
 
 模块（Cookie / ecs_token 可跑的部分）：
   首页签到、领取签到奖励、话费红包、月签有礼、任务中心、
   SigninApp 积分/翻倍/1G 日包、娱乐打卡、沃之树、
   看视频流量、金币抽奖、天天领现金、通通乡村、
-  每周一 10:00 抢兑 10 元话费券。
+  权益超市抽奖、会员中心浏览领积分、沃云手机积分、每周一 10:00 抢兑 10 元话费券。
 
 多账号用 & 连接。密码登录若触发短信风控，改用 Cookie 或 token_online。
 """
 
 import base64
 import datetime
+import hashlib
+import hmac
 import json
 import os
 import random
@@ -35,7 +37,39 @@ import requests
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5 as Cipher_pkcs1_v1_5
 
-APP_VERSION = "android@11.0802"
+APP_VERSION = "android@12.1000"
+DEVICE_MODEL = "M2007J1SC"
+APP_UA = (
+    "Mozilla/5.0 (Linux; Android 13; M2007J1SC Build/TKQ1.221114.001; wv) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/116.0.0.0 "
+    "Mobile Safari/537.36; unicom{version:android@12.1000,desmobile:0};"
+    "devicetype{deviceBrand:Xiaomi,deviceModel:M2007J1SC};OSVersion/13;ltst;"
+)
+MARKET_H5_UA = APP_UA
+MARKET_UA = APP_UA
+MARKET_BASE = "https://backward.bol.wo.cn/prod-api"
+MARKET_MEMBER_CENTER_PAGE_ID = "s782351687947921408"
+MARKET_MEMBER_CENTER_DISTRIBUTE_ID = "D1161369893988319232"
+MARKET_MEMBER_CENTER_PARTNERS_ID = "1703"
+MARKET_MEMBER_CENTER_CLIENT_TYPE = "marketUnicom"
+MARKET_MEMBER_CENTER_TASK_CODE = "s769153426294495232"
+_MARKET_JF_CACHE = {"ticket": None, "secretKey": None}
+UPHONE_H5API = "https://uphone.wostore.cn/h5api"
+UPHONE_CHANNEL = "ST-Wode"
+UPHONE_CHANNEL_H5 = "ST-Jingang002"
+UPHONE_EDOP_APP_ID = "edop_unicom_68e8fa69"
+UPHONE_ACT_SIGN = "Points_Sign_2507"
+UPHONE_ACT_OBTAIN = "Points_Obtain_2507"
+UPHONE_ACT_EXCHANGE = "Points_Exchange_2507"
+UPHONE_OBTAIN_SKIP = frozenset({"012-4", "TASK2026010601"})
+UPHONE_APP_UA = (
+    "ChinaUnicom4.x/12.13 (com.chinaunicom.mobilebusiness; build:1; iOS 27.0.0) "
+    "Alamofire/4.7.3 unicom{version:iphone_c@12.1300}"
+)
+UPHONE_H5_UA = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko)  unicom{version:iphone_c@12.1300};ltst;OSVersion/27.0"
+)
 LOGIN_URL = "https://m.client.10010.com/mobileService/login.htm"
 ONLINE_URL = "https://m.client.10010.com/mobileService/onLine.htm"
 SIGNIN_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/signin/daySign"
@@ -53,12 +87,7 @@ TTXC_BASE_URL = "https://epay.10010.com/cu-ca-game-front"
 TTXC_APP_BASE_URL = "https://epay.10010.com/cu-ca-app-front"
 TTXC_CHANNEL = "225"
 TTXC_REFERER = "https://epay.10010.com/cu-ca-game-web/index.html?channel=qdqp"
-TTXC_UA = (
-    "Mozilla/5.0 (Linux; Android 10; MI 8 Build/QKQ1.190828.002; wv) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/143.0.7499.146 "
-    "Mobile Safari/537.36; unicom{version:android@11.0802,desmobile:0};"
-    "devicetype{deviceBrand:Xiaomi,deviceModel:MI 8}"
-)
+TTXC_UA = APP_UA
 TTXC_NEWBIE_STEPS = ["G01", "G02", "G03", "G03_2", "G04", "G05", "G09", "G10", "G11", "G12"]
 TTXC_GARBAGE_WAIT = 8
 TTXC_GROW_MAX = 4
@@ -71,20 +100,36 @@ NPhQo07+uqGQgE4imwNnRx7PFtCRryiIEcUoavuNtuRVoBAm6qdB0Srctg
 aqGfLgKvZHOnwTjyNqjBUxzMeQlEC2czEMSwIDAQAB
 -----END PUBLIC KEY-----'''
 
-ANDROID_UA = "Dalvik/2.1.0 (Linux; U; Android 12; Mi 10 Pro MIUI/21.11.3);unicom{version:android@11.0802}"
-IPHONE_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0_2 like Mac OS X) "
-    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
-    "unicom{version:iphone_c@11.0602}"
-)
-SIGNIN_APP_UA = IPHONE_UA
+SIGNIN_APP_UA = APP_UA
+
+
+ENV_FILE = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
+ENV_DATE_RE = re.compile(r"#(\d{4}-\d{2}-\d{2}|\d{8})\s*$")
+
+
+def env_today():
+    return datetime.datetime.now().strftime("%Y-%m-%d")
+
+
+def strip_env_date(value):
+    value = (value or "").strip()
+    match = ENV_DATE_RE.search(value)
+    if match:
+        return value[: match.start()].rstrip(), match.group(1)
+    return value, ""
+
+
+def stamp_env_date(value, date_str=None):
+    core, _ = strip_env_date(value)
+    if not core:
+        return value
+    return f"{core}#{date_str or env_today()}"
 
 
 def load_dotenv():
-    env_file = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"))
-    if not os.path.isfile(env_file):
+    if not os.path.isfile(ENV_FILE):
         return
-    with open(env_file, "r", encoding="utf-8", errors="replace") as f:
+    with open(ENV_FILE, "r", encoding="utf-8", errors="replace") as f:
         for raw in f:
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -96,10 +141,67 @@ def load_dotenv():
                 os.environ[key] = value
 
 
+def write_env_key(key, value):
+    if not key or value is None:
+        return False
+    lines = []
+    if os.path.isfile(ENV_FILE):
+        with open(ENV_FILE, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    found = False
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped and stripped.split("=", 1)[0].strip() == key:
+            out.append(f"{key}={value}")
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(f"{key}={value}")
+    with open(ENV_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.environ[key] = value
+    return True
+
+
+def update_env_date(key, raw_value=None, account=None, multi=True):
+    current = raw_value if raw_value is not None else (os.getenv(key) or "")
+    if not current.strip():
+        return False
+    today = env_today()
+    parts = [p.strip() for p in re.split(r"[&]", current) if p.strip()] if multi else [current.strip()]
+    updated = []
+    changed = False
+    for part in parts:
+        core, old_date = strip_env_date(part)
+        if account:
+            hit = account in core.split("#")
+        else:
+            hit = True
+        if hit:
+            stamped = f"{core}#{today}"
+            updated.append(stamped)
+            if old_date != today or stamped != part:
+                changed = True
+        else:
+            updated.append(part)
+    if not changed:
+        return False
+    joiner = "&" if multi else ""
+    new_value = joiner.join(updated)
+    if write_env_key(key, new_value):
+        print(f"  变量 {key} 已更新日期 {today}")
+        return True
+    return False
+
+
 def load_accounts(raw):
     accounts = []
     for item in re.split(r"[&]", raw or ""):
-        item = item.strip()
+        item, _ = strip_env_date(item.strip())
         if not item:
             continue
         parts = item.split("#")
@@ -116,7 +218,7 @@ def load_accounts(raw):
 def load_tokens(raw):
     tokens = []
     for item in re.split(r"[&]", raw or ""):
-        item = item.strip()
+        item, _ = strip_env_date(item.strip())
         if not item:
             continue
         parts = item.split("#")
@@ -187,7 +289,7 @@ def login(session, mobile, passwd, appid):
         "version": APP_VERSION,
         "mobile": rsa_encrypt(mobile),
         "reqtime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "deviceModel": "Android",
+        "deviceModel": DEVICE_MODEL,
         "netWay": "Wifi",
         "isR4": "0",
         "password": rsa_encrypt(passwd),
@@ -198,7 +300,7 @@ def login(session, mobile, passwd, appid):
         "Accept": "*/*",
         "Content-Type": "application/x-www-form-urlencoded",
         "Connection": "keep-alive",
-        "User-Agent": ANDROID_UA,
+        "User-Agent": APP_UA,
         "Accept-Language": "zh-cn",
     }
     try:
@@ -217,10 +319,10 @@ def online(session, token_online, appid=""):
     data = {
         "isFirstInstall": "1",
         "netWay": "Wifi",
-        "version": "android@11.0000",
+        "version": APP_VERSION,
         "token_online": token_online,
         "provinceChanel": "general",
-        "deviceModel": "ALN-AL10",
+        "deviceModel": DEVICE_MODEL,
         "step": "dingshi",
         "androidId": uuid.uuid4().hex[:16],
         "reqtime": int(time.time() * 1000),
@@ -231,7 +333,7 @@ def online(session, token_online, appid=""):
         resp = session.post(
             ONLINE_URL,
             data=data,
-            headers={"User-Agent": ANDROID_UA, "Content-Type": "application/x-www-form-urlencoded"},
+            headers={"User-Agent": APP_UA, "Content-Type": "application/x-www-form-urlencoded"},
             timeout=30,
         )
         body = resp.json()
@@ -250,7 +352,7 @@ def online(session, token_online, appid=""):
 
 def base_headers(cookie_header=None, extra=None):
     headers = {
-        "user-agent": IPHONE_UA,
+        "user-agent": APP_UA,
         "referer": "https://img.client.10010.com",
         "origin": "https://img.client.10010.com",
         "content-type": "application/x-www-form-urlencoded",
@@ -768,7 +870,7 @@ def extra_daily_tasks(session, cookie_header=None):
         "referer": "https://img.client.10010.com",
         "origin": "https://img.client.10010.com",
     }
-    data1 = {"methodType": "signin", "clientVersion": "11.0802", "deviceType": "Android"}
+    data1 = {"methodType": "signin", "clientVersion": "12.1000", "deviceType": "Android"}
     res1 = api(
         session,
         "POST",
@@ -845,6 +947,717 @@ def open_plat_line_new(session, cookie_header, to_url):
     code = resp.status_code if resp is not None else "?"
     print(f"  openPlatLineNew: 状态码 {code}")
     return None
+
+
+def parse_jwt_payload(token):
+    try:
+        parts = (token or "").split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        data = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def market_signature_headers(user_token, query_string="", json_body=""):
+    token = (user_token or "").replace("Bearer ", "").strip()
+    parsed = parse_jwt_payload(token)
+    login_id = parsed.get("loginId", "")
+    if not login_id:
+        return {}
+    app_secret = hashlib.md5(f"al:ak:{login_id}".encode("utf-8")).hexdigest()
+    nonce = str(uuid.uuid4())
+    message = f"{login_id}{app_secret}{nonce}{query_string or ''}{json_body or ''}"
+    signature = base64.b64encode(
+        hmac.new(app_secret.encode("utf-8"), message.encode("utf-8"), digestmod=hashlib.sha256).digest()
+    ).decode("utf-8")
+    return {
+        "X-User-Id": login_id,
+        "X-Nonce": nonce,
+        "X-Timestamp": str(int(time.time() * 1000)),
+        "X-Signature": signature,
+        "Content-Type": "application/json",
+    }
+
+
+def market_headers(user_token):
+    return {
+        "User-Agent": MARKET_UA,
+        "Authorization": f"Bearer {(user_token or '').replace('Bearer ', '').strip()}",
+        "Content-Type": "application/json",
+        "X-Requested-With": "com.sinovatech.unicom.ui",
+    }
+
+
+def market_get_user_token(session, ticket):
+    url = f"{MARKET_BASE}/auth/marketUnicomLogin?ticket={ticket}"
+    headers = {"User-Agent": MARKET_UA, "Connection": "Keep-Alive", "Accept-Encoding": "gzip"}
+    for attempt in range(1, 4):
+        try:
+            res = session.post(url, headers=headers, timeout=30).json()
+            if str(res.get("code")) == "200":
+                data = res.get("data")
+                token = data.get("token") if isinstance(data, dict) else data
+                if token:
+                    return token
+            print(f"  权益超市: 获取 userToken 失败: {res.get('msg') or res.get('code')}")
+        except Exception as e:
+            print(f"  权益超市: 获取 userToken 异常: {e}")
+        if attempt < 3:
+            sleep(5)
+    return None
+
+
+def market_user_raffle(session, user_token):
+    try:
+        query_string = f"id=12&channel=unicomTab&timeVerRan={int(time.time() * 1000)}"
+        headers = market_headers(user_token)
+        headers.update(market_signature_headers(user_token, query_string, "{}"))
+        headers["Referer"] = "https://contact.bol.wo.cn/market"
+        res = session.post(
+            f"{MARKET_BASE}/promotion/home/raffleActivity/userRaffle?{query_string}",
+            headers=headers, data="{}", timeout=15,
+        ).json()
+        if str(res.get("code")) == "200":
+            data = res.get("data") or {}
+            prize_name = data.get("prizesName", "") if isinstance(data, dict) else ""
+            message = (data.get("message") if isinstance(data, dict) else "") or res.get("msg") or ""
+            if prize_name and "谢谢参与" not in prize_name:
+                print(f"  权益超市: 抽奖成功: {prize_name}")
+            else:
+                print(f"  权益超市: 未中奖: {message}")
+            return True
+        print(f"  权益超市: 抽奖失败: {res.get('msg') or res.get('code')}")
+        return False
+    except Exception as e:
+        print(f"  权益超市: 抽奖异常: {e}")
+        return False
+
+
+def market_get_points_ticket(session, user_token):
+    try:
+        res = session.get(
+            f"{MARKET_BASE}/auth/getTicket?channel=pointsPlatform",
+            headers={
+                "Authorization": f"Bearer {(user_token or '').replace('Bearer ', '').strip()}",
+                "User-Agent": MARKET_UA,
+            },
+            timeout=15,
+        ).json()
+        if str(res.get("code")) == "200" and res.get("data"):
+            return res.get("data")
+        print(f"  会员中心: 获取 points ticket 失败: {res.get('msg') or res}")
+    except Exception as e:
+        print(f"  会员中心: 获取 points ticket 异常: {e}")
+    return None
+
+
+def market_member_center_base_headers(points_ticket):
+    referer = (
+        f"https://m.jf.10010.com/ts-mobile/well/{MARKET_MEMBER_CENTER_PAGE_ID}"
+        f"?distributeId={MARKET_MEMBER_CENTER_DISTRIBUTE_ID}"
+        f"&partnersId={MARKET_MEMBER_CENTER_PARTNERS_ID}"
+        f"&clientType={MARKET_MEMBER_CENTER_CLIENT_TYPE}"
+        f"&ticket={points_ticket}"
+    )
+    return {
+        "origin": "https://m.jf.10010.com",
+        "clienttype": MARKET_MEMBER_CENTER_CLIENT_TYPE,
+        "ticket": points_ticket,
+        "partnersid": MARKET_MEMBER_CENTER_PARTNERS_ID,
+        "content-type": "application/json;charset=UTF-8",
+        "pageid": MARKET_MEMBER_CENTER_PAGE_ID,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": referer,
+        "User-Agent": MARKET_H5_UA,
+        "X-Requested-With": "com.sinovatech.unicom.ui",
+    }
+
+
+def market_get_secret_key_jf(session, points_ticket):
+    if _MARKET_JF_CACHE.get("secretKey") and _MARKET_JF_CACHE.get("ticket") == points_ticket:
+        return _MARKET_JF_CACHE["secretKey"]
+    try:
+        res = session.get(
+            "https://m.jf.10010.com/jf-external-application/jftask/getSecretKey",
+            headers=market_member_center_base_headers(points_ticket),
+            timeout=10,
+        ).json()
+        secret = (res.get("data") or {}).get("secretKey")
+        if str(res.get("code")) == "0000" and secret:
+            _MARKET_JF_CACHE["ticket"] = points_ticket
+            _MARKET_JF_CACHE["secretKey"] = secret.encode("utf-8")
+            return _MARKET_JF_CACHE["secretKey"]
+        print(f"  会员中心: getSecretKey 失败: {res}")
+    except Exception as e:
+        print(f"  会员中心: getSecretKey 异常: {e}")
+    return None
+
+
+def market_build_signature_headers_jf(session, points_ticket):
+    secret_key = market_get_secret_key_jf(session, points_ticket)
+    if not secret_key:
+        return {}
+    request_ts = str(round(time.time() * 1000))
+    nonce = "".join(random.choices("0123456789abcdefghijklmnopqrstuvwxyz", k=8))
+    signature = hmac.new(secret_key, f"{nonce}{request_ts}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "x-request-timestamp": request_ts,
+        "x-request-nonce": nonce,
+        "x-request-signature": signature,
+    }
+
+
+def market_member_center_headers(session, points_ticket, with_sign=False):
+    headers = market_member_center_base_headers(points_ticket)
+    if with_sign:
+        headers.update(market_build_signature_headers_jf(session, points_ticket))
+    return headers
+
+
+def market_prepare_member_center_context(session, points_ticket):
+    try:
+        session.post(
+            "https://m.jf.10010.com/jf-external-application/page/query",
+            json={
+                "activityId": MARKET_MEMBER_CENTER_PAGE_ID,
+                "distributeId": MARKET_MEMBER_CENTER_DISTRIBUTE_ID,
+                "partnersId": MARKET_MEMBER_CENTER_PARTNERS_ID,
+            },
+            headers=market_member_center_headers(session, points_ticket, with_sign=True),
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"  会员中心: page/query 预热异常: {e}")
+    try:
+        session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/userInfo",
+            json={},
+            headers=market_member_center_headers(session, points_ticket, with_sign=True),
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"  会员中心: userInfo 预热异常: {e}")
+
+
+def market_member_center_finish_code(task):
+    return safe_int(task.get("finish", task.get("status", 0)), 0)
+
+
+def market_member_center_finish_text(task):
+    finish_text = str(task.get("finishText", "")).strip()
+    if finish_text:
+        return finish_text
+    return {
+        0: "未完成",
+        99: "待领取",
+        100: "已领取",
+    }.get(market_member_center_finish_code(task), "未知状态")
+
+
+def market_query_member_center_task(session, points_ticket):
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/taskDetail",
+            json={},
+            headers=market_member_center_headers(session, points_ticket, with_sign=True),
+            timeout=10,
+        ).json()
+        if str(res.get("code")) != "0000":
+            print(f"  会员中心: 查询任务失败: {res}")
+            return None
+        task_list = ((res.get("data") or {}).get("taskDetail") or {}).get("taskList") or []
+        return next(
+            (task for task in task_list if str(task.get("taskCode")) == MARKET_MEMBER_CENTER_TASK_CODE),
+            None,
+        )
+    except Exception as e:
+        print(f"  会员中心: 查询任务异常: {e}")
+        return None
+
+
+def market_wait_member_center_task_state(session, points_ticket, expected_codes, attempts=4, delay=2):
+    task = None
+    for idx in range(1, attempts + 1):
+        task = market_query_member_center_task(session, points_ticket)
+        if task:
+            finish_code = market_member_center_finish_code(task)
+            finish_text = market_member_center_finish_text(task)
+            text_matches = (
+                (finish_text == "待领取" and 99 in expected_codes)
+                or (finish_text == "已领取" and 100 in expected_codes)
+            )
+            if finish_code in expected_codes or text_matches:
+                return task
+            print(
+                f"  会员中心: 第{idx}次回查状态 {finish_text}/{finish_code}，"
+                f"本月进度 {safe_int(task.get('finishCount'), 0)}/{safe_int(task.get('needCount'), 0)}"
+            )
+        if idx < attempts:
+            sleep(delay)
+            market_prepare_member_center_context(session, points_ticket)
+    return task
+
+
+def market_mark_member_center_browse_done(session, user_token, task_fix_id):
+    try:
+        token = (user_token or "").replace("Bearer ", "").strip()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Origin": "https://contact.bol.wo.cn",
+            "Referer": "https://contact.bol.wo.cn/",
+            "Content-Type": "application/json",
+            "Accept": "*/*",
+            "User-Agent": MARKET_H5_UA,
+            "X-Requested-With": "com.sinovatech.unicom.ui",
+        }
+        detail = session.get(
+            f"{MARKET_BASE}/promotion/activityTask/getActivityTaskDetailByFixId?taskFixId={task_fix_id}",
+            headers=headers,
+            timeout=10,
+        ).json()
+        if str(detail.get("code")) != "200":
+            print(f"  会员中心: 获取任务详情失败: {detail.get('msg') or detail}")
+            return False
+        task_data = detail.get("data") or {}
+        check_key = task_data.get("param1")
+        wait_seconds = max(safe_int(task_data.get("content"), 17), 15)
+        if not check_key:
+            print("  会员中心: 未拿到 checkKey，跳过浏览任务")
+            return False
+        print(f"  会员中心: 模拟浏览 {wait_seconds} 秒")
+        sleep(wait_seconds)
+        check = session.post(
+            f"{MARKET_BASE}/promotion/activityTaskShare/checkView?checkKey={check_key}",
+            json={},
+            headers=headers,
+            timeout=10,
+        ).json()
+        if str(check.get("code")) == "200" and check.get("data") is True:
+            print("  会员中心: 浏览完成，任务已进入待领取")
+            return True
+        print(f"  会员中心: checkView 失败: {check.get('msg') or check}")
+    except Exception as e:
+        print(f"  会员中心: 浏览任务异常: {e}")
+    return False
+
+
+def market_receive_member_center_points(session, points_ticket):
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jfmarkettask/receive",
+            json={"taskCode": MARKET_MEMBER_CENTER_TASK_CODE},
+            headers=market_member_center_headers(session, points_ticket, with_sign=True),
+            timeout=10,
+        ).json()
+        if str(res.get("code")) == "0000":
+            score = (res.get("data") or {}).get("score", "未知积分")
+            title = (res.get("data") or {}).get("title", "领取成功")
+            print(f"  会员中心: {title}，获得 {score}")
+            return True
+        print(f"  会员中心: 领取失败: {res.get('msg') or res}")
+    except Exception as e:
+        print(f"  会员中心: 领取异常: {e}")
+    return False
+
+
+def market_do_monthly_view_tasks(session, user_token):
+    token = (user_token or "").replace("Bearer ", "").strip()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": MARKET_H5_UA,
+        "Origin": "https://contact.bol.wo.cn",
+        "Referer": "https://contact.bol.wo.cn/",
+        "Content-Type": "application/json",
+        "X-Requested-With": "com.sinovatech.unicom.ui",
+    }
+    try:
+        res = session.get(
+            f"{MARKET_BASE}/promotion/activityTask/getAllActivityTasks?activityId=12",
+            headers=headers,
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  权益超市任务: 获取列表异常: {e}")
+        return
+    if str(res.get("code")) != "200":
+        print(f"  权益超市任务: 获取列表失败: {res.get('msg') or res.get('code')}")
+        return
+    tasks = (res.get("data") or {}).get("activityTaskUserDetailVOList") or []
+    for task in tasks:
+        name = task.get("name") or ""
+        param = task.get("param1") or ""
+        triggered = safe_int(task.get("triggeredTime"), 0)
+        trigger = safe_int(task.get("triggerTime"), 0)
+        if any(k in name for k in ("购买", "秒杀", "分享")):
+            continue
+        if trigger and triggered >= trigger:
+            print(f"  权益超市任务: {name} [已完成]")
+            continue
+        if not param:
+            continue
+        if not any(k in name for k in ("浏览", "查看")):
+            continue
+        try:
+            check = session.post(
+                f"{MARKET_BASE}/promotion/activityTaskShare/checkView?checkKey={param}",
+                json={},
+                headers=headers,
+                timeout=15,
+            ).json()
+            if str(check.get("code")) == "200":
+                print(f"  权益超市任务: {name} [浏览成功]")
+            else:
+                print(f"  权益超市任务: {name} [失败] {check.get('msg') or check.get('code')}")
+        except Exception as e:
+            print(f"  权益超市任务: {name} [异常] {e}")
+        sleep(1)
+
+
+def market_member_center_task(session, user_token):
+    print("==== 会员中心浏览领积分 ====")
+    market_do_monthly_view_tasks(session, user_token)
+    points_ticket = market_get_points_ticket(session, user_token)
+    if not points_ticket:
+        return
+    market_prepare_member_center_context(session, points_ticket)
+    task = market_query_member_center_task(session, points_ticket)
+    if not task:
+        print("  会员中心: 活动页已失效或本月无浏览积分任务，跳过")
+        return
+    finish_code = market_member_center_finish_code(task)
+    finish_text = market_member_center_finish_text(task)
+    finish_count = safe_int(task.get("finishCount"), 0)
+    need_count = safe_int(task.get("needCount"), 0)
+    print(f"  会员中心: 当前状态 {finish_text}/{finish_code}，本月进度 {finish_count}/{need_count}")
+    if need_count and finish_count >= need_count:
+        print("  会员中心: 本月次数已达上限")
+        return
+    if finish_code == 100 or finish_text == "已领取":
+        print("  会员中心: 今日已领取，跳过")
+        return
+    if finish_code == 0 or finish_text == "未完成":
+        jump_url = str(task.get("jumpUrl", "")).strip()
+        match = re.search(r"taskFixId=(\d+)", jump_url)
+        task_fix_id = match.group(1) if match else "90"
+        if not market_mark_member_center_browse_done(session, user_token, task_fix_id):
+            return
+        market_prepare_member_center_context(session, points_ticket)
+        task = market_wait_member_center_task_state(session, points_ticket, {99, 100}, attempts=4, delay=2)
+        if not task:
+            return
+        finish_code = market_member_center_finish_code(task)
+        finish_text = market_member_center_finish_text(task)
+        print(
+            f"  会员中心: 浏览后状态 {finish_text}/{finish_code}，"
+            f"本月进度 {safe_int(task.get('finishCount'), 0)}/{safe_int(task.get('needCount'), 0)}"
+        )
+    if finish_code == 99 or finish_text == "待领取":
+        market_receive_member_center_points(session, points_ticket)
+    elif finish_code != 100:
+        print("  会员中心: 状态未及时刷新，尝试直接领奖")
+        if not market_receive_member_center_points(session, points_ticket):
+            print("  会员中心: 直接领奖失败，跳过")
+
+
+def market_rights_lottery(session, cookie_header=None):
+    print("==== 权益超市抽奖 ====")
+    try:
+        ticket_res = open_plat_line_new(session, cookie_header, "https://contact.bol.wo.cn/market")
+    except Exception as e:
+        print(f"  权益超市: 获取 ticket 异常: {e}")
+        return
+    ticket = (ticket_res or {}).get("ticket")
+    if not ticket:
+        print("  权益超市: 获取 ticket 失败，跳过")
+        return
+    user_token = market_get_user_token(session, ticket)
+    if not user_token:
+        print("  权益超市: 获取 userToken 失败，跳过")
+        return
+
+    count = 0
+    try:
+        query_string = f"id=12&channel=unicomTab&timeVerRan={int(time.time() * 1000)}"
+        headers = market_headers(user_token)
+        headers.update(market_signature_headers(user_token, query_string, "{}"))
+        headers["Referer"] = "https://contact.bol.wo.cn/market"
+        res = session.post(
+            f"{MARKET_BASE}/promotion/home/raffleActivity/getUserRaffleCountExt?{query_string}",
+            headers=headers, data="{}", timeout=15,
+        ).json()
+        if str(res.get("code")) == "200":
+            data = res.get("data")
+            count = int(data.get("raffleCount") or 0) if isinstance(data, dict) else int(data or 0)
+        else:
+            print(f"  权益超市: 查询抽奖次数失败: {res.get('msg') or res.get('code')}")
+            count = 0
+    except Exception as e:
+        print(f"  权益超市: 查询抽奖次数异常: {e}")
+        count = 0
+
+    if count <= 0:
+        print("  权益超市: 当前无抽奖次数")
+    else:
+        print(f"  权益超市: 当前抽奖次数 {count}")
+        for i in range(count):
+            print(f"  权益超市: 第 {i + 1} 次抽奖...")
+            if not market_user_raffle(session, user_token):
+                break
+            sleep(3 + random.random() * 2)
+
+    sleep(2)
+    market_member_center_task(session, user_token)
+
+
+def uphone_biz_ok(data):
+    if not isinstance(data, dict):
+        return False
+    return data.get("code") in (200, "200", 0, "0")
+
+
+def uphone_app_headers(cp_token="", extra=None):
+    headers = {
+        "User-Agent": UPHONE_APP_UA,
+        "Accept": "*/*",
+        "channel": UPHONE_CHANNEL,
+        "channelCode": UPHONE_CHANNEL,
+        "deviceId": "0",
+    }
+    if cp_token:
+        headers["Authorization"] = cp_token
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def uphone_h5_headers(usr_token="", extra=None):
+    headers = {
+        "User-Agent": UPHONE_H5_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json; charset=UTF-8",
+        "Origin": "https://uphone.wostore.cn",
+    }
+    if usr_token:
+        headers["X-USR-TOKEN"] = usr_token
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def uphone_sso_login(session, cookie_header=None):
+    ecs_token = session.cookies.get("ecs_token") or cookie_get(cookie_header, "ecs_token")
+    if not ecs_token:
+        print("  云手机: 无 ecs_token，跳过")
+        return None
+    try:
+        r = session.get(
+            "https://m.client.10010.com/edop_ng/getTicketByNative",
+            params={"token": ecs_token, "appId": UPHONE_EDOP_APP_ID},
+            headers={"User-Agent": UPHONE_APP_UA, "Accept": "*/*"},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云手机: 换 ticket 异常: {e}")
+        return None
+    ticket = r.get("ticket")
+    if not ticket and isinstance(r.get("data"), dict):
+        ticket = r.get("data").get("ticket")
+    if not ticket:
+        print(f"  云手机: 换 ticket 失败: {r.get('rsp_desc') or r.get('msg') or r.get('code') or r.get('rsp_code')}")
+        return None
+    try:
+        r2 = session.post(
+            f"{UPHONE_H5API}/token-service/getTokenByTicket",
+            headers=uphone_app_headers(extra={"Content-Type": "application/json"}),
+            json={"channel": UPHONE_CHANNEL, "ticket": ticket},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云手机: 换 cpToken 异常: {e}")
+        return None
+    token = r2.get("data")
+    if isinstance(token, dict):
+        token = token.get("data") or token.get("token")
+    if not (uphone_biz_ok(r2) and isinstance(token, str) and token.startswith("eyJ")):
+        print(f"  云手机: 换 cpToken 失败: {r2.get('msg') or r2.get('code')}")
+        return None
+    print("  云手机: SSO 成功")
+    return token
+
+
+def uphone_activity_login(session, cp_token, activity_id):
+    try:
+        r = session.post(
+            f"{UPHONE_H5API}/activity-service/user/login",
+            headers=uphone_h5_headers(),
+            json={
+                "identityType": "cloudPhoneLogin",
+                "code": cp_token,
+                "channelId": UPHONE_CHANNEL_H5,
+                "activityId": activity_id,
+                "device": "device",
+            },
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云手机: 活动登录异常({activity_id}): {e}")
+        return None
+    nested = r.get("data") if isinstance(r.get("data"), dict) else None
+    tok = nested.get("user_token") if isinstance(nested, dict) else None
+    if not (uphone_biz_ok(r) and tok):
+        print(f"  云手机: 活动登录失败({activity_id}): {r.get('msg') or r.get('code')}")
+        return None
+    return str(tok)
+
+
+def uphone_points_summary(session, usr_token):
+    try:
+        r = session.get(
+            f"{UPHONE_H5API}/activity-service/points/v1/summary",
+            headers=uphone_h5_headers(usr_token),
+            params={"activityCode": UPHONE_ACT_EXCHANGE},
+            timeout=15,
+        ).json()
+    except Exception:
+        return None
+    nested = r.get("data") if isinstance(r.get("data"), dict) else None
+    if not (uphone_biz_ok(r) and isinstance(nested, dict)):
+        return None
+    inner = nested.get("data")
+    return inner if isinstance(inner, dict) else nested
+
+
+def uphone_sign(session, usr_token):
+    try:
+        r = session.post(
+            f"{UPHONE_H5API}/activity-service/points/v1/sign",
+            headers=uphone_h5_headers(usr_token),
+            json={"activityCode": UPHONE_ACT_SIGN},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云手机: 签到异常: {e}")
+        return False
+    if uphone_biz_ok(r):
+        print(f"  云手机: 签到成功: {r.get('msg') or 'ok'}")
+        return True
+    msg = str(r.get("msg") or "")
+    if any(k in msg for k in ("已签", "签过", "重复")):
+        print(f"  云手机: 今日已签到: {msg}")
+        return True
+    print(f"  云手机: 签到失败: {msg or r.get('code')}")
+    return False
+
+
+def uphone_task_list(session, usr_token, activity_code):
+    try:
+        r = session.post(
+            f"{UPHONE_H5API}/activity-service/user/task/list",
+            headers=uphone_h5_headers(usr_token),
+            json={"activityCode": activity_code},
+            timeout=15,
+        ).json()
+    except Exception:
+        return []
+    nested = r.get("data") if isinstance(r.get("data"), dict) else r
+    if not isinstance(nested, dict):
+        return []
+    task_list = nested.get("taskList") or []
+    return task_list if isinstance(task_list, list) else []
+
+
+def uphone_task_logs(session, usr_token, task_code, detail):
+    try:
+        r = session.post(
+            f"{UPHONE_H5API}/activity-service/user/task/logs",
+            headers=uphone_h5_headers(usr_token),
+            json={"logType": "01", "logCode": task_code, "logSource": "01", "logDetail": detail},
+            timeout=15,
+        ).json()
+    except Exception:
+        return False, None
+    nested = r.get("data") if isinstance(r.get("data"), dict) else r
+    return uphone_biz_ok(nested if isinstance(nested, dict) else r), nested if isinstance(nested, dict) else r
+
+
+def uphone_raffle_get(session, usr_token, activity_code, task_code):
+    try:
+        r = session.post(
+            f"{UPHONE_H5API}/activity-service/user/task/raffle/get",
+            headers=uphone_h5_headers(usr_token),
+            json={"activityCode": activity_code, "taskCode": task_code},
+            timeout=15,
+        ).json()
+    except Exception:
+        return False, None
+    nested = r.get("data") if isinstance(r.get("data"), dict) else r
+    body = nested if isinstance(nested, dict) else r
+    if isinstance(body, dict) and body.get("code") in (10301, "10301"):
+        print(f"  云手机: 领奖受限 {task_code}: {body.get('msg')}")
+        return False, body
+    return uphone_biz_ok(body if isinstance(body, dict) else r), body
+
+
+def uphone_obtain_tasks(session, usr_token):
+    tasks = uphone_task_list(session, usr_token, UPHONE_ACT_OBTAIN)
+    claimed = logged = skipped = 0
+    for t in tasks:
+        if t.get("status") != "UNCLAIMED":
+            continue
+        code = str(t.get("taskCode") or "")
+        ok, _ = uphone_raffle_get(session, usr_token, UPHONE_ACT_OBTAIN, code)
+        if ok:
+            claimed += 1
+            print(f"  云手机: 领取 {code} {t.get('taskName')} +{t.get('pointsCount')}")
+        sleep(0.3)
+    tasks = uphone_task_list(session, usr_token, UPHONE_ACT_OBTAIN)
+    for t in tasks:
+        code = str(t.get("taskCode") or "")
+        name = str(t.get("taskName") or code)
+        if t.get("status") != "INCOMPLETE":
+            continue
+        if code in UPHONE_OBTAIN_SKIP:
+            skipped += 1
+            continue
+        ok, body = uphone_task_logs(session, usr_token, code, name)
+        if not ok:
+            print(f"  云手机: 任务上报失败 {code}: {(body or {}).get('msg')}")
+            sleep(0.2)
+            continue
+        logged += 1
+        sleep(0.3)
+        tasks2 = uphone_task_list(session, usr_token, UPHONE_ACT_OBTAIN)
+        t2 = next((x for x in tasks2 if x.get("taskCode") == code), None)
+        if not t2 or t2.get("status") != "UNCLAIMED":
+            print(f"  云手机: 任务未达可领 {code} status={t2.get('status') if t2 else '?'}")
+            continue
+        ok, _ = uphone_raffle_get(session, usr_token, UPHONE_ACT_OBTAIN, code)
+        if ok:
+            claimed += 1
+            print(f"  云手机: 完成 {code} {name} +{t.get('pointsCount')}")
+        sleep(0.3)
+    print(f"  云手机: 积分任务 claimed={claimed} logged={logged} skipped={skipped}")
+
+
+def uphone_points_task(session, cookie_header=None):
+    print("==== 沃云手机积分 ====")
+    cp_token = uphone_sso_login(session, cookie_header)
+    if not cp_token:
+        return
+    usr_token = uphone_activity_login(session, cp_token, UPHONE_ACT_SIGN)
+    if not usr_token:
+        return
+    uphone_sign(session, usr_token)
+    obtain_token = uphone_activity_login(session, cp_token, UPHONE_ACT_OBTAIN)
+    if obtain_token:
+        uphone_obtain_tasks(session, obtain_token)
+        usr_token = obtain_token
+    summary = uphone_points_summary(session, usr_token)
+    if summary:
+        print(f"  云手机: 余额 {summary.get('balanceScoreNum')}")
 
 
 def get_bizchannelinfo(session, cookie_header, rpt_id=""):
@@ -1444,6 +2257,8 @@ def run_all(session, cookie_header=None, mobile="", grab_only=False):
     extra_daily_tasks(session, cookie_header)
     ttlxj_task(session, cookie_header)
     ttxc_task(session, cookie_header)
+    market_rights_lottery(session, cookie_header)
+    uphone_points_task(session, cookie_header)
     sign_get_telephone(session, cookie_header, is_initial=False, ctx=ctx)
     sign_query_my_prizes(session, cookie_header)
     return ok, msg
@@ -1453,7 +2268,7 @@ def main():
     load_dotenv()
     grab_only = (os.getenv("UNICOM_GRAB_ONLY") or "").strip() in ("1", "true", "True") or "--grab" in sys.argv
     token_raw = (os.getenv("UNICOM_TOKEN") or "").strip()
-    cookie = (os.getenv("UNICOM_COOKIE") or "").strip()
+    cookie, _ = strip_env_date((os.getenv("UNICOM_COOKIE") or "").strip())
     accounts = load_accounts(os.getenv("UNICOM_ACCOUNT"))
     tokens = load_tokens(token_raw)
     if grab_only:
@@ -1479,13 +2294,17 @@ def main():
             if not ok:
                 continue
             ok, _ = run_all(session, grab_only=grab_only)
-            ok_count += 1 if ok else 0
+            if ok:
+                update_env_date("UNICOM_TOKEN", token_raw, account=token)
+                ok_count += 1
             sleep(2)
     elif cookie:
         print("中国联通签到（Cookie 模式）")
         session = requests.Session()
         ok, _ = run_all(session, cookie_header=cookie, grab_only=grab_only)
-        ok_count += 1 if ok else 0
+        if ok:
+            update_env_date("UNICOM_COOKIE", os.getenv("UNICOM_COOKIE") or cookie, multi=False)
+            ok_count += 1
     else:
         print(f"中国联通签到（密码模式）：共 {len(accounts)} 个账号")
         for idx, (phone, password, appid) in enumerate(accounts, start=1):
@@ -1504,7 +2323,9 @@ def main():
             if not ok:
                 continue
             ok, _ = run_all(session, mobile=phone, grab_only=grab_only)
-            ok_count += 1 if ok else 0
+            if ok:
+                update_env_date("UNICOM_ACCOUNT", os.getenv("UNICOM_ACCOUNT") or "", account=phone)
+                ok_count += 1
             sleep(2)
 
     print(f"\n完成：成功 {ok_count} 项")

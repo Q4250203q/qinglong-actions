@@ -196,31 +196,43 @@ def console(title: str, content: str) -> None:
 def dingding_bot(title: str, content: str) -> None:
     """
     使用 钉钉机器人 推送消息。
+    支持两种方式：
+      1) 仅 DD_BOT_TOKEN（自定义机器人未加签 / 关键词）
+      2) DD_BOT_TOKEN + DD_BOT_SECRET（加签）
     """
-    if not push_config.get("DD_BOT_SECRET") or not push_config.get("DD_BOT_TOKEN"):
-        print("钉钉机器人 服务的 DD_BOT_SECRET 或者 DD_BOT_TOKEN 未设置!!\n取消推送")
+    token = push_config.get("DD_BOT_TOKEN")
+    if not token:
+        print("钉钉机器人 服务的 DD_BOT_TOKEN 未设置!!\n取消推送")
         return
     print("钉钉机器人 服务启动")
 
-    timestamp = str(round(time.time() * 1000))
-    secret_enc = push_config.get("DD_BOT_SECRET").encode("utf-8")
-    string_to_sign = "{}\n{}".format(timestamp, push_config.get("DD_BOT_SECRET"))
-    string_to_sign_enc = string_to_sign.encode("utf-8")
-    hmac_code = hmac.new(
-        secret_enc, string_to_sign_enc, digestmod=hashlib.sha256
-    ).digest()
-    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
-    url = f'https://oapi.dingtalk.com/robot/send?access_token={push_config.get("DD_BOT_TOKEN")}&timestamp={timestamp}&sign={sign}'
+    url = f'https://oapi.dingtalk.com/robot/send?access_token={token}'
+    secret = push_config.get("DD_BOT_SECRET")
+    if secret:
+        timestamp = str(round(time.time() * 1000))
+        secret_enc = secret.encode("utf-8")
+        string_to_sign = "{}\n{}".format(timestamp, secret)
+        string_to_sign_enc = string_to_sign.encode("utf-8")
+        hmac_code = hmac.new(
+            secret_enc, string_to_sign_enc, digestmod=hashlib.sha256
+        ).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        url += f'&timestamp={timestamp}&sign={sign}'
+
     headers = {"Content-Type": "application/json;charset=utf-8"}
     data = {"msgtype": "text", "text": {"content": f"{title}\n\n{content}"}}
-    response = requests.post(
-        url=url, data=json.dumps(data), headers=headers, timeout=15
-    ).json()
+    try:
+        response = requests.post(
+            url=url, data=json.dumps(data), headers=headers, timeout=15
+        ).json()
+    except Exception as e:
+        print(f"钉钉机器人 推送异常: {e}")
+        return
 
-    if not response["errcode"]:
+    if not response.get("errcode"):
         print("钉钉机器人 推送成功！")
     else:
-        print("钉钉机器人 推送失败！")
+        print(f"钉钉机器人 推送失败！{response.get('errmsg', '')}")
 
 
 def feishu_bot(title: str, content: str) -> None:
@@ -650,7 +662,7 @@ if push_config.get("BARK_PUSH"):
     notify_function.append(bark)
 if push_config.get("CONSOLE"):
     notify_function.append(console)
-if push_config.get("DD_BOT_TOKEN") and push_config.get("DD_BOT_SECRET"):
+if push_config.get("DD_BOT_TOKEN"):
     notify_function.append(dingding_bot)
 if push_config.get("FSKEY"):
     notify_function.append(feishu_bot)

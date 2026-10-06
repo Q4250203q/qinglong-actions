@@ -36,7 +36,7 @@ v5.0.3:
 配置说明:
 变量名: ydyp
 赋值方式:
-格式：Authorization值#手机号
+格式：Authorization值#手机号[#YYYY-MM-DD]
 
 ⚠️ 依赖安装:
 pip3 install requests pycryptodome
@@ -93,6 +93,75 @@ err_accounts = ''  # 异常账号
 all_logs = ''      # 所有用户的详细运行日志 (原 err_message)
 user_amount = ''   # 用户云朵·数量
 GLOBAL_DEBUG = False
+ENV_FILE = path.normpath(path.join(path.abspath(path.dirname(__file__)), '..', '.env'))
+ENV_DATE_RE = re.compile(r'#(\d{4}-\d{2}-\d{2}|\d{8})\s*$')
+
+
+def env_today():
+    return datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
+
+
+def strip_env_date(value):
+    value = (value or '').strip()
+    match = ENV_DATE_RE.search(value)
+    if match:
+        return value[:match.start()].rstrip(), match.group(1)
+    return value, ''
+
+
+def write_env_key(key, value):
+    if not key or value is None:
+        return False
+    lines = []
+    if path.isfile(ENV_FILE):
+        with open(ENV_FILE, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.read().splitlines()
+    found = False
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith('#') and '=' in stripped and stripped.split('=', 1)[0].strip() == key:
+            out.append(f'{key}={value}')
+            found = True
+        else:
+            out.append(line)
+    if not found:
+        if out and out[-1].strip():
+            out.append('')
+        out.append(f'{key}={value}')
+    with open(ENV_FILE, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out) + '\n')
+    os.environ[key] = value
+    return True
+
+
+def update_env_date(key, raw_value=None, account=None):
+    current = raw_value if raw_value is not None else (os.getenv(key) or '')
+    if not current.strip():
+        return False
+    today = env_today()
+    parts = [p.strip() for p in re.split(r'[&]', current) if p.strip()]
+    updated = []
+    changed = False
+    for part in parts:
+        core, old_date = strip_env_date(part)
+        if account:
+            hit = account in core.split('#')
+        else:
+            hit = True
+        if hit:
+            stamped = f'{core}#{today}'
+            updated.append(stamped)
+            if old_date != today or stamped != part:
+                changed = True
+        else:
+            updated.append(part)
+    if not changed:
+        return False
+    if write_env_key(key, '&'.join(updated)):
+        print(f'-变量 {key} 已更新日期 {today}')
+        return True
+    return False
 
 
 def current_millis():
@@ -338,6 +407,7 @@ class YP:
             self.timestamp = str(int(round(time.time() * 1000)))
             self.cookies = {'sensors_stay_time': self.timestamp}
 
+            cookie, _ = strip_env_date(cookie)
             parts = cookie.split("#")
             if len(parts) < 2:
                 raise ValueError(f"⚠️ 变量值格式错误，需要: Authorization值#手机号")
@@ -582,6 +652,7 @@ class YP:
             self.open_send()
             self.get_tasklist(url = 'newsign_139mail', app_type = 'email_app')
             self.receive()
+            update_env_date('ydyp', os.getenv('ydyp') or '', account=self.account)
             global all_logs
             user_log_str = "\n".join(self.user_log_lines)
             all_logs += f"用户【{self.encrypt_account}】日志:\n{user_log_str}\n\n"
@@ -2110,7 +2181,7 @@ if __name__ == "__main__":
         print(f'⛔️未获取到ck变量：请检查变量 {env_name} 是否填写')
         exit(0)
 
-    cookies = re.split(r'[&]', token)
+    cookies = [strip_env_date(item.strip())[0] for item in re.split(r'[&]', token) if item.strip()]
     print_startup_info(len(cookies))
     print_device_id_notice()
     print_storage_path_notice()

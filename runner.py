@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """呆呆面板任务调度：cron 匹配、脚本执行、日志与历史。"""
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -20,7 +21,7 @@ LOGS_DIR.mkdir(exist_ok=True)
 ENV_FILE = BASE_DIR / ".env"
 
 
-def load_dotenv():
+def iter_dotenv():
     if not ENV_FILE.exists():
         return
     for raw in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -30,8 +31,21 @@ def load_dotenv():
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip("'").strip('"')
-        if key and key not in os.environ:
+        if key:
+            yield key, value
+
+
+def load_dotenv():
+    for key, value in iter_dotenv() or []:
+        if key not in os.environ:
             os.environ[key] = value
+
+
+def env_with_dotenv():
+    env = os.environ.copy()
+    for key, value in iter_dotenv() or []:
+        env[key] = value
+    return env
 
 
 load_dotenv()
@@ -247,7 +261,7 @@ def run_task(task):
 
     try:
         start = time.time()
-        env = os.environ.copy()
+        env = env_with_dotenv()
         node_path = env.get("NODE_PATH", "")
         extra = "/usr/local/lib/node_modules"
         env["NODE_PATH"] = extra if not node_path else extra + os.pathsep + node_path
@@ -302,6 +316,58 @@ def run_task(task):
         return {"task_id": task_id, "name": name, "status": "error", "error": error_msg, "log": log_file.name}
 
 
+_SEND = None
+
+
+def _load_send():
+    """加载 scripts/notify.py 的 send()，失败返回 None。"""
+    global _SEND
+    if _SEND is not None:
+        return _SEND or None
+    notify_path = SCRIPTS_DIR / "notify.py"
+    if not notify_path.exists():
+        _SEND = False
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("notify", notify_path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _SEND = getattr(module, "send", False)
+    except Exception as e:
+        print(f"[通知] 加载 notify.py 失败: {e}")
+        _SEND = False
+    return _SEND or None
+
+
+def notify_result(result):
+    """任务完成后把结果推送到已配置的通知渠道（如钉钉）。"""
+    send = _load_send()
+    if not send:
+        return
+    name = result.get("name", "任务")
+    status = result.get("status", "unknown")
+    icon = "✅" if status == "success" else "❌"
+    title = f"{icon} 呆呆面板 · {name} [{status.upper()}]"
+    lines = [
+        f"任务: {name}",
+        f"状态: {status.upper()}",
+    ]
+    if result.get("elapsed") is not None:
+        lines.append(f"耗时: {result['elapsed']}s")
+    if result.get("ran_at"):
+        lines.append(f"时间: {result['ran_at']}")
+    if result.get("error"):
+        lines.append(f"错误: {result['error']}")
+    body = result.get("output") or ""
+    if body:
+        lines.append("")
+        lines.append(body.strip())
+    try:
+        send(title, "\n".join(lines))
+    except Exception as e:
+        print(f"[通知] 推送异常: {e}")
+
+
 def _run_list(tasks, title):
     now = now_cst()
     print(f"\n{'=' * 60}")
@@ -312,7 +378,10 @@ def _run_list(tasks, title):
 
     results = []
     for task in tasks:
-        results.append(run_task(task))
+        result = run_task(task)
+        result["ran_at"] = now_cst().strftime("%Y-%m-%d %H:%M:%S")
+        results.append(result)
+        notify_result(result)
         print()
 
     success = sum(1 for r in results if r["status"] == "success")
