@@ -13,7 +13,9 @@
   首页签到、领取签到奖励、话费红包、月签有礼、任务中心、
   SigninApp 积分/翻倍/1G 日包、娱乐打卡、沃之树、
   看视频流量、金币抽奖、天天领现金、通通乡村、
-  权益超市抽奖、会员中心浏览领积分、沃云手机积分、每周一 10:00 抢兑 10 元话费券。
+  权益超市抽奖、会员中心浏览领积分、沃云手机积分、
+  联通云盘（签到/AI/抽奖/校园季/上传大比拼）、沃阅读积分、
+  每周一 10:00 抢兑 10 元话费券。
 
 多账号用 & 连接。密码登录若触发短信风控，改用 Cookie 或 token_online。
 """
@@ -35,7 +37,8 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 import requests
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5 as Cipher_pkcs1_v1_5
+from Crypto.Cipher import AES, PKCS1_v1_5 as Cipher_pkcs1_v1_5
+from Crypto.Util.Padding import pad
 
 APP_VERSION = "android@12.1000"
 DEVICE_MODEL = "M2007J1SC"
@@ -70,6 +73,27 @@ UPHONE_H5_UA = (
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko)  unicom{version:iphone_c@12.1300};ltst;OSVersion/27.0"
 )
+CLOUD_EDOP_APP_ID = "edop_unicom_d67b3e30"
+CLOUD_CLIENT_ID = "1001000003"
+CLOUD_JF_PARTNERS = "1649"
+CLOUD_PAN_SIGN_SECRET = "s8Hf3LqP9xN2vM5bR7tY1wZ4cA6eG0K"
+CLOUD_FILEINFO_IV = "wNSOYIB1k1DjY5lA"
+CLOUD_LOTTERY_DEFAULT = "MjU="
+CAMPUS_ACTIVITY_DEFAULT = "MzU="
+CLOUD_BATTLE_DEFAULT = "Mzg="
+CLOUD_BATTLE_TOUCHPOINT = "300200030001"
+CLOUD_BATTLE_PAGE = "uploadBattle"
+CAMPUS_UPLOAD_URL = "https://tjupload.pan.wo.cn/openapi/client/upload2C"
+CLOUD_BATTLE_UPLOAD_DEFAULT = "https://hyupload.pan.wo.cn/openapi/client/upload2C"
+WOREAD_BASE = "https://10010.woread.com.cn/ng_woread_service/rest"
+WOREAD_KEY = b"woreadst^&*12345"
+WOREAD_IV = b"16-Bytes--String"
+WOREAD_APPID = "10000002"
+WOREAD_APPSECRET = "7k1HcDL8RKvc"
+WOREAD_JF_PARTNERS = "1706"
+WOREAD_SIGN_TASK = "s818795876839563264"
+WOREAD_CNTINDEX = 3120941
+WOREAD_CHAPTERALLINDEX = 120470473
 LOGIN_URL = "https://m.client.10010.com/mobileService/login.htm"
 ONLINE_URL = "https://m.client.10010.com/mobileService/onLine.htm"
 SIGNIN_URL = "https://activity.10010.com/sixPalaceGridTurntableLottery/signin/daySign"
@@ -2238,6 +2262,1207 @@ def ttxc_task(session, cookie_header=None):
     TtxcFarm(session, cookie_header).run()
 
 
+def cloud_env(name, default=""):
+    return (os.getenv(name) or default).strip()
+
+
+def cloud_activity_sign(payload):
+    raw = "&".join(f"{k}={payload[k]}" for k in sorted(payload)) + f"&secret={CLOUD_PAN_SIGN_SECRET}"
+    return hmac.new(CLOUD_PAN_SIGN_SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
+
+def cloud_encrypt_fileinfo(info, token):
+    key = (token[:16]).encode()
+    cipher = AES.new(key, AES.MODE_CBC, CLOUD_FILEINFO_IV.encode())
+    plaintext = json.dumps(info, separators=(",", ":"))
+    return base64.b64encode(cipher.encrypt(pad(plaintext.encode(), AES.block_size))).decode()
+
+
+def cloud_meta_code(data):
+    if not isinstance(data, dict):
+        return ""
+    meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+    return str(meta.get("code") or data.get("code") or "")
+
+
+def cloud_extract_ticket(payload):
+    if not isinstance(payload, dict):
+        return ""
+    ticket = payload.get("ticket")
+    data = payload.get("data")
+    if not ticket and isinstance(data, dict):
+        ticket = data.get("ticket")
+    return ticket or ""
+
+
+def cloud_phone_location(session, state, cookie_header=None):
+    cached = ((state or {}).get("provinceCode"), (state or {}).get("provinceName"))
+    if cached[0] and cached[1]:
+        return cached
+    mobile = (
+        session.cookies.get("c_mobile")
+        or cookie_get(cookie_header, "c_mobile")
+        or ""
+    )
+    token = (state or {}).get("userToken") or ""
+    if not mobile or not token:
+        return "", ""
+    cipher = AES.new(b"CBWGjFHjZdhTf7h8", AES.MODE_CBC, CLOUD_FILEINFO_IV.encode())
+    enc = base64.b64encode(cipher.encrypt(pad(mobile.encode(), AES.block_size))).decode()
+    try:
+        res = session.post(
+            "https://panservice.mail.wo.cn/api-user/user/info/query",
+            json={"mobile": enc},
+            headers=cloud_activity_headers(state),
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: 查询归属地异常: {e}")
+        return "", ""
+    result = res.get("result") if isinstance(res.get("result"), dict) else {}
+    code = str(result.get("provinceCode") or "").lstrip("0") or str(result.get("provinceCode") or "")
+    name = str(result.get("provinceName") or "")
+    if code and name:
+        state["provinceCode"] = code
+        state["provinceName"] = name
+        print(f"  云盘: 归属地 {name}({code})")
+        return code, name
+    return "", ""
+
+
+def cloud_dispatcher_login(session, ticket, login_key="HandheldHallAutoLogin"):
+    timestamp = str(int(time.time() * 1000))
+    rnd = str(random.randint(123456, 199999))
+    sign = hashlib.md5(f"{login_key}{timestamp}{rnd}wohome".encode()).hexdigest()
+    try:
+        r2 = session.post(
+            "https://panservice.mail.wo.cn/wohome/dispatcher",
+            headers={"User-Agent": APP_UA, "Content-Type": "application/json"},
+            json={
+                "header": {
+                    "key": login_key,
+                    "resTime": timestamp,
+                    "reqSeq": rnd,
+                    "channel": "wohome",
+                    "version": "",
+                    "sign": sign,
+                },
+                "body": {"clientId": CLOUD_CLIENT_ID, "ticket": ticket},
+            },
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: dispatcher 异常: {e}")
+        return None
+    data = r2.get("RSP") if isinstance(r2.get("RSP"), dict) else r2
+    nested = data.get("DATA") if isinstance(data, dict) else None
+    token = nested.get("token") if isinstance(nested, dict) else ""
+    if not token and isinstance(r2.get("body"), dict):
+        token = r2.get("body").get("token") or ""
+    if token:
+        return token, r2
+    return None, r2
+
+
+def cloud_openplat_ticket(session, cookie_header=None):
+    entry = (
+        "https://panservice.mail.wo.cn/h5/activitymobile/campusSeason"
+        f"?activityId={quote(cloud_env('UNICOM_CAMPUS_ACTIVITY_ID', CAMPUS_ACTIVITY_DEFAULT))}&type=02"
+    )
+    try:
+        r = session.get(
+            "https://m.client.10010.com/mobileService/openPlatform/openPlatLineNew.htm",
+            params={"to_url": entry},
+            headers=base_headers(cookie_header, {"User-Agent": APP_UA}),
+            allow_redirects=False,
+            timeout=15,
+        )
+    except Exception as e:
+        print(f"  云盘: openPlat 异常: {e}")
+        return ""
+    loc = r.headers.get("Location") or r.headers.get("location") or ""
+    ticket = (parse_qs(urlparse(loc).query).get("ticket") or [""])[0]
+    return ticket
+
+
+def cloud_native_ticket(session, cookie_header=None):
+    ecs_token = session.cookies.get("ecs_token") or cookie_get(cookie_header, "ecs_token")
+    if not ecs_token:
+        return ""
+    try:
+        r = session.get(
+            "https://m.client.10010.com/edop_ng/getTicketByNative",
+            params={"appId": CLOUD_EDOP_APP_ID, "token": ecs_token},
+            headers={"User-Agent": APP_UA, "Accept": "*/*"},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: 换 native ticket 异常: {e}")
+        return ""
+    return cloud_extract_ticket(r)
+
+
+def cloud_pan_login(session, cookie_header=None):
+    ticket = cloud_native_ticket(session, cookie_header)
+    token = None
+    if ticket:
+        token, _ = cloud_dispatcher_login(session, ticket, "HandheldHallAutoLoginV2")
+        if not token:
+            token, _ = cloud_dispatcher_login(session, ticket, "HandheldHallAutoLogin")
+    if not token:
+        ticket = cloud_openplat_ticket(session, cookie_header)
+        if not ticket:
+            print("  云盘: 换 ticket 失败")
+            return None
+        token, r2 = cloud_dispatcher_login(session, ticket, "HandheldHallAutoLogin")
+        if not token:
+            token, r2 = cloud_dispatcher_login(session, ticket, "HandheldHallAutoLoginV2")
+        if not token:
+            desc = ""
+            if isinstance(r2, dict) and isinstance(r2.get("RSP"), dict):
+                desc = r2.get("RSP").get("RSP_DESC") or r2.get("RSP").get("RSP_CODE") or ""
+            print(f"  云盘: 换 userToken 失败: {desc or '无 token'}")
+            return None
+    print("  云盘: SSO 成功")
+    return {"userToken": token, "ticket": ticket}
+
+
+def cloud_userticket(session, state):
+    token = (state or {}).get("userToken") or ""
+    if not token:
+        return ""
+    headers = {
+        "User-Agent": APP_UA,
+        "Content-Type": "application/json",
+        "X-YP-Access-Token": token,
+        "accesstoken": token,
+        "token": token,
+        "clientId": CLOUD_CLIENT_ID,
+        "X-YP-Client-Id": CLOUD_CLIENT_ID,
+        "source-type": "woapi",
+        "app-type": "unicom",
+    }
+    try:
+        res = session.post(
+            "https://panservice.mail.wo.cn/api-user/api/user/ticket",
+            json={},
+            headers=headers,
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: userticket 异常: {e}")
+        return ""
+    ticket = ((res.get("result") or {}) if isinstance(res, dict) else {}).get("ticket")
+    if ticket:
+        state["userticket"] = ticket
+        return ticket
+    print(f"  云盘: userticket 失败: {res}")
+    return ""
+
+
+def cloud_jf_headers(state, with_sign=False):
+    ticket = (state or {}).get("userticket") or ""
+    headers = {
+        "User-Agent": APP_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json;charset=UTF-8",
+        "Origin": "https://m.jf.10010.com",
+        "ticket": ticket,
+        "partnersid": CLOUD_JF_PARTNERS,
+        "clienttype": "yunpan_android",
+        "x-requested-with": "com.sinovatech.unicom.ui",
+    }
+    jea = (state or {}).get("jeaId")
+    if jea:
+        headers["Cookie"] = f"_jea_id={jea};"
+    if with_sign:
+        secret = (state or {}).get("secretKey")
+        if secret:
+            request_ts = str(round(time.time() * 1000))
+            nonce = "".join(random.choices("0123456789abcdefghijklmnopqrstuvwxyz", k=8))
+            signature = hmac.new(secret, f"{nonce}{request_ts}".encode(), hashlib.sha256).hexdigest()
+            headers.update({
+                "x-request-timestamp": request_ts,
+                "x-request-nonce": nonce,
+                "x-request-signature": signature,
+            })
+    return headers
+
+
+def cloud_capture_jea(session, state, response=None):
+    jea = session.cookies.get("_jea_id") or ""
+    if not jea and response is not None:
+        cookie = response.headers.get("Set-Cookie") or response.headers.get("set-cookie") or ""
+        match = re.search(r"_jea_id=([^;]+)", cookie)
+        if match:
+            jea = match.group(1)
+    if jea:
+        state["jeaId"] = jea
+    return jea
+
+
+def cloud_userinfo(session, state):
+    if not cloud_userticket(session, state):
+        return None
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/userInfo",
+            json={},
+            headers=cloud_jf_headers(state),
+            timeout=10,
+        )
+        cloud_capture_jea(session, state, res)
+        data = res.json()
+    except Exception as e:
+        print(f"  云盘: userInfo 异常: {e}")
+        return None
+    info = data.get("data") if isinstance(data, dict) else None
+    if isinstance(info, dict):
+        avail = info.get("availableScore")
+        today = info.get("todayEarnScore", 0)
+        if "initial_avail" not in state:
+            state["initial_avail"] = avail
+            print(f"  云盘: 运行前 今日已赚 {today} 可用积分 {avail}")
+        else:
+            try:
+                earned = int(avail) - int(state.get("initial_avail") or 0)
+            except (TypeError, ValueError):
+                earned = 0
+            print(f"  云盘: 运行后 今日已赚 {today} 可用 {avail} 本次 {earned}")
+        return info
+    return None
+
+
+def cloud_secret_key(session, state):
+    if state.get("secretKey"):
+        return state["secretKey"]
+    if not state.get("userticket") or not state.get("jeaId"):
+        return None
+    try:
+        res = session.get(
+            "https://m.jf.10010.com/jf-external-application/jftask/getSecretKey",
+            headers=cloud_jf_headers(state),
+            timeout=10,
+        ).json()
+        secret = (res.get("data") or {}).get("secretKey")
+        if str(res.get("code")) == "0000" and secret:
+            state["secretKey"] = secret.encode("utf-8")
+            return state["secretKey"]
+        print(f"  云盘: getSecretKey 失败: {res.get('code') or res}")
+    except Exception as e:
+        print(f"  云盘: getSecretKey 异常: {e}")
+    return None
+
+
+def cloud_task_list(session, state):
+    if not cloud_userticket(session, state):
+        return []
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/taskDetail",
+            json={},
+            headers=cloud_jf_headers(state),
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: taskDetail 异常: {e}")
+        return []
+    if not isinstance(res, dict):
+        return []
+    return ((res.get("data") or {}).get("taskDetail") or {}).get("taskList") or []
+
+
+def cloud_to_finish(session, state, task_code):
+    if not cloud_userticket(session, state):
+        return False
+    cloud_secret_key(session, state)
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/toFinish",
+            json={"taskCode": task_code},
+            headers=cloud_jf_headers(state, with_sign=True),
+            timeout=10,
+        ).json()
+        return str(res.get("code")) == "0000" or res.get("data") is True
+    except Exception:
+        return False
+
+
+def cloud_do_sign(session, state, task_code, task_name):
+    if not cloud_userticket(session, state):
+        return
+    cloud_secret_key(session, state)
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/sign",
+            json={"taskCode": task_code},
+            headers=cloud_jf_headers(state, with_sign=True),
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: [{task_name}] 签到异常: {e}")
+        return
+    score = (res.get("data") or {}).get("score") if isinstance(res.get("data"), dict) else None
+    if "0000" in str(res.get("code")) and score:
+        print(f"  云盘: [{task_name}] 完成, 积分 {score}")
+    elif any(k in str(res.get("msg") or res.get("message") or "") for k in ("已签", "签过", "重复")):
+        print(f"  云盘: [{task_name}] 今日已签到")
+    else:
+        print(f"  云盘: [{task_name}] {res.get('msg') or res.get('code') or '失败'}")
+
+
+def cloud_do_popup(session, state, task_name):
+    if not cloud_userticket(session, state):
+        return
+    sleep(2)
+    try:
+        res = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/popUp",
+            json={},
+            headers=cloud_jf_headers(state),
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: [{task_name}] 领奖异常: {e}")
+        return
+    code = str((res.get("meta") or {}).get("code") or res.get("code") or "")
+    if code in ("0000", "0"):
+        score = (res.get("data") or {}).get("score", 0) if isinstance(res.get("data"), dict) else 0
+        print(f"  云盘: [{task_name}] 领取完成{(' 积分 ' + str(score)) if score else ''}")
+    else:
+        print(f"  云盘: [{task_name}] 领取失败: {res.get('msg') or code}")
+
+
+def cloud_ai_chat(session, state, task_code, task_name):
+    token = (state or {}).get("userToken") or ""
+    if not token:
+        return False
+    headers = {
+        "accept": "text/event-stream",
+        "X-YP-Access-Token": token,
+        "X-YP-App-Version": "5.0.12",
+        "X-YP-Client-Id": "1001000035",
+        "User-Agent": APP_UA,
+        "Content-Type": "application/json",
+        "Origin": "https://panservice.mail.wo.cn",
+        "Referer": f"https://panservice.mail.wo.cn/h5/wocloud_ai/?modelType=0&clientId=1001000035&touchpoint=300300010001&token={token}",
+    }
+    payload = {
+        "input": "你好",
+        "platform": 2,
+        "modelId": 0,
+        "tag": 21,
+        "subTag": 210000,
+        "conversationId": "",
+        "knowledgeId": "",
+        "referFileInfo": [],
+    }
+    try:
+        res = session.post(
+            "https://panservice.mail.wo.cn/wohome/ai/assistant/query",
+            json=payload,
+            headers=headers,
+            timeout=30,
+            stream=True,
+        )
+        body = ""
+        for chunk in res.iter_content(chunk_size=1024):
+            if chunk:
+                body += chunk.decode("utf-8", errors="ignore")
+            if len(body) > 2048:
+                break
+        if '"finish":1' in body or "success" in body or res.status_code == 200:
+            print(f"  云盘: [{task_name}] AI 互动成功")
+            cloud_do_popup(session, state, task_name)
+            return True
+        print(f"  云盘: [{task_name}] AI 互动失败 HTTP {res.status_code}")
+    except Exception as e:
+        print(f"  云盘: [{task_name}] AI 异常: {e}")
+    return False
+
+
+def cloud_activity_headers(state, activity_id="", extra=None):
+    token = (state or {}).get("userToken") or ""
+    headers = {
+        "User-Agent": APP_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "source-type": "woapi",
+        "clientId": "1001000165",
+        "X-YP-Client-Id": "1001000165",
+        "token": token,
+        "X-YP-Access-Token": token,
+        "X-SH-Access-Token": "",
+        "X-YP-GRAY-FLAG": "undefined",
+        "Origin": "https://panservice.mail.wo.cn",
+        "requestTime": str(int(time.time() * 1000)),
+    }
+    if activity_id:
+        headers["Referer"] = (
+            "https://panservice.mail.wo.cn/h5/activitymobile/fileUploadActive"
+            f"?touchpoint=300300010005&activityId={quote(activity_id)}&token={token}"
+        )
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def cloud_lottery_times(session, state, activity_id):
+    try:
+        res = session.get(
+            "https://panservice.mail.wo.cn/activity/lottery/lottery-times",
+            params={"activityId": activity_id},
+            headers=cloud_activity_headers(state, activity_id),
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  云盘: 查询抽奖次数异常: {e}")
+        return None, 0
+    result = res.get("result")
+    count = 0
+    if isinstance(result, int):
+        count = result
+    elif isinstance(result, dict):
+        for key in ("times", "lotteryTimes", "freeTimes", "drawTimes", "count"):
+            if key in result:
+                count = safe_int(result.get(key), 0)
+                break
+    return res, max(count, 0)
+
+
+def cloud_draw_lottery(session, state):
+    activity_id = cloud_env("UNICOM_CLOUD_LOTTERY_ACTIVITY_ID", CLOUD_LOTTERY_DEFAULT)
+    times_res, count = cloud_lottery_times(session, state, activity_id)
+    if times_res is None:
+        return
+    code = cloud_meta_code(times_res)
+    if code not in ("200", "90003603"):
+        print(f"  云盘: 抽奖活动[{activity_id}] 无效: {times_res.get('meta', {}).get('message') or code}")
+        return
+    if count <= 0:
+        print(f"  云盘: 抽奖活动[{activity_id}] 当前无抽奖次数")
+        return
+    print(f"  云盘: 抽奖次数 {count}")
+    for _ in range(min(count, 5)):
+        try:
+            res = session.post(
+                "https://panservice.mail.wo.cn/activity/lottery",
+                json={"activityId": activity_id},
+                headers=cloud_activity_headers(state, activity_id),
+                timeout=10,
+            ).json()
+        except Exception as e:
+            print(f"  云盘: 抽奖异常: {e}")
+            break
+        if cloud_meta_code(res) == "92000017":
+            print("  云盘: 转盘已抽奖")
+            return
+        prize = (res.get("result") or {}).get("prizeName") if isinstance(res.get("result"), dict) else ""
+        if prize:
+            print(f"  云盘: 转盘获得 {prize}")
+        else:
+            print(f"  云盘: 抽奖结果 {res.get('meta', {}).get('message') or cloud_meta_code(res)}")
+            break
+        sleep(1.5)
+
+
+def cloud_run_daily_tasks(session, state):
+    tasks = cloud_task_list(session, state)
+    if not tasks:
+        print("  云盘: 任务列表为空")
+        return
+    names = [t.get("taskName", "?") for t in tasks]
+    print(f"  云盘: 任务列表({len(tasks)}): {', '.join(names)}")
+    for task in tasks:
+        sleep(0.5)
+        name = task.get("taskName") or ""
+        code = task.get("taskCode")
+        finish_text = str(task.get("finishText") or "")
+        finished = safe_int(task.get("finishCount"), 0)
+        required = safe_int(task.get("needCount"), 0)
+        if finish_text == "待领取":
+            cloud_do_popup(session, state, name)
+            continue
+        if finish_text in ("已完成", "已领取") or task.get("finishState") is True or (required > 0 and finished >= required):
+            print(f"  云盘: [{name}] 已完成")
+            continue
+        print(f"  云盘: 开始 [{name}] {finished}/{required}")
+        if "签到" in name:
+            cloud_to_finish(session, state, code)
+            cloud_do_sign(session, state, code, name)
+        elif "AI" in name or "通通" in name:
+            cloud_to_finish(session, state, code)
+            cloud_ai_chat(session, state, code, name)
+        elif any(k in name for k in ("微信备份", "通讯录", "上传容量", "1GB", "邀请")):
+            print(f"  云盘: [{name}] 需真实行为，跳过")
+        else:
+            cloud_to_finish(session, state, code)
+            sleep(1)
+            cloud_do_popup(session, state, name)
+
+
+def cloud_upload2c(session, state, url, file_name, content, referer=None):
+    token = (state or {}).get("userToken") or ""
+    if not token:
+        return False, "缺少云盘 userToken"
+    file_info = {
+        "batchNo": datetime.datetime.now().strftime("%Y%m%d%H%M%S"),
+        "fileName": file_name,
+        "fileSize": len(content),
+        "fileType": 1,
+        "directoryId": "0",
+        "spaceType": "0",
+    }
+    form = {
+        "uniqueId": f"{int(time.time() * 1000)}_{random.randint(100000, 999999)}",
+        "accessToken": token,
+        "psToken": "",
+        "totalPart": "1",
+        "partSize": str(len(content)),
+        "partIndex": "1",
+        "channel": "wocloud",
+        "fileName": file_name,
+        "fileSize": str(len(content)),
+        "directoryId": "0",
+        "spaceType": "0",
+        "fileInfo": cloud_encrypt_fileinfo(file_info, token),
+    }
+    headers = {
+        "User-Agent": APP_UA,
+        "Referer": referer or "https://panservice.mail.wo.cn/",
+        "accessToken": token,
+        "access-token": token,
+    }
+    try:
+        res = session.post(url, data=form, files={"file": (file_name, content, "text/plain")}, headers=headers, timeout=30)
+        data = res.json()
+    except Exception as e:
+        return False, str(e)[:120]
+    if str(data.get("code")) == "0000":
+        fid = data.get("data", {}).get("fid", "") if isinstance(data.get("data"), dict) else ""
+        return True, f"上传成功 {file_name} fid={str(fid)[:24]}"
+    return False, str(data.get("msg") or data.get("message") or data.get("code") or res.text[:80])
+
+
+def cloud_signed_post(session, state, path, key, activity_id, extra=None, headers=None):
+    hdrs = headers or cloud_activity_headers(state, activity_id)
+    try:
+        ts = session.post(
+            "https://panservice.mail.wo.cn/activity/getTimestamp",
+            headers=hdrs,
+            json={"key": key},
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  云盘活动: getTimestamp 异常: {e}")
+        return {}
+    result = (ts.get("result") if isinstance(ts.get("result"), dict) else None) or ((ts.get("data") or {}).get("result") if isinstance(ts.get("data"), dict) else {}) or {}
+    nonce, timestamp = result.get("nonce"), result.get("timestamp")
+    if not nonce or not timestamp:
+        print(f"  云盘活动: getTimestamp 失败 {cloud_meta_code(ts)}")
+        return {}
+    body = {"activityId": activity_id, **(extra or {})}
+    body["nonce"] = nonce
+    body["timestamp"] = timestamp
+    body["sign"] = cloud_activity_sign(body)
+    try:
+        return session.post(
+            f"https://panservice.mail.wo.cn{path}",
+            headers=hdrs,
+            json=body,
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  云盘活动: {path} 异常: {e}")
+        return {}
+
+
+def campus_headers(state, activity_id):
+    token = (state or {}).get("userToken") or ""
+    return {
+        "X-YP-Access-Token": token,
+        "token": token,
+        "Access-Token": token,
+        "source-type": "woapi",
+        "clientId": "1001000165",
+        "X-YP-Client-Id": CLOUD_CLIENT_ID,
+        "Content-Type": "application/json",
+        "requestTime": str(int(time.time() * 1000)),
+        "User-Agent": APP_UA,
+        "Origin": "https://panservice.mail.wo.cn",
+        "Referer": (
+            "https://panservice.mail.wo.cn/h5/activitymobile/campusSeason"
+            f"?activityId={quote(activity_id)}&type=02&token={token}&clientid={CLOUD_CLIENT_ID}"
+        ),
+    }
+
+
+def campus_task(session, state):
+    print("==== 云盘校园季 ====")
+    if not (state or {}).get("userToken"):
+        print("  校园季: 缺少 userToken，跳过")
+        return
+    activity_id = cloud_env("UNICOM_CAMPUS_ACTIVITY_ID", CAMPUS_ACTIVITY_DEFAULT)
+    headers = campus_headers(state, activity_id)
+    try:
+        r = session.post(
+            "https://panservice.mail.wo.cn/activity/task/activate",
+            headers=headers,
+            json={"activityId": activity_id},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  校园季: 激活异常: {e}")
+        return
+    if cloud_meta_code(r) != "200":
+        print(f"  校园季: 激活失败 {r.get('meta', {}).get('message') or cloud_meta_code(r)}")
+        return
+    print("  校园季: 激活成功")
+    tl = cloud_signed_post(session, state, "/activity/school/task/list", "activity:school:activate", activity_id, headers=headers)
+    done = {}
+    for t in ((tl.get("result") or {}).get("taskList") or []):
+        code = str(t.get("taskCode") or "")
+        name = t.get("taskName") or code
+        daily = safe_int(t.get("dailyLimit"), 0)
+        cur = safe_int(t.get("doneCount"), 0)
+        if code in ("30004", "30008"):
+            done[code] = daily > 0 and cur >= daily
+            print(f"  校园季: [{name}] {cur}/{daily}{' (已满)' if done[code] else ''}")
+    if done.get("30004"):
+        print("  校园季: 上传任务已满，跳过")
+    else:
+        ok, msg = cloud_upload2c(session, state, CAMPUS_UPLOAD_URL, "1.txt", b"1", referer="https://panservice.mail.wo.cn/")
+        print(f"  校园季: 上传{'成功' if ok else '失败'}: {msg}")
+        if ok:
+            sleep(3)
+    if done.get("30008"):
+        print("  校园季: AI 任务已满，跳过")
+    else:
+        cloud_ai_chat(session, state, "30008", "学习助手")
+    try:
+        lt = session.get(
+            "https://panservice.mail.wo.cn/activity/lottery/lottery-times",
+            params={"activityId": activity_id},
+            headers=headers,
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  校园季: 查询抽奖次数异常: {e}")
+        return
+    times = lt.get("result")
+    times = times if isinstance(times, int) else 0
+    if times <= 0:
+        print("  校园季: 当前无可抽奖次数")
+        return
+    for _ in range(min(times, 5)):
+        res = cloud_signed_post(session, state, "/activity/lottery", "activity:lottery", activity_id, headers=headers)
+        if cloud_meta_code(res) == "200":
+            prize = (res.get("result") or {}).get("prizeName") or "未知奖品"
+            print(f"  校园季: 抽奖成功 {prize}")
+        else:
+            print(f"  校园季: 抽奖失败 {res.get('meta', {}).get('message') or cloud_meta_code(res)}")
+            break
+        sleep(1.5)
+
+
+def battle_headers(state, activity_id, referer=""):
+    token = (state or {}).get("userToken") or ""
+    return {
+        "X-YP-Access-Token": token,
+        "Accept": "application/json, text/plain, */*",
+        "source-type": "woapi",
+        "requestTime": str(int(time.time() * 1000)),
+        "User-Agent": APP_UA,
+        "clientId": "1001000165",
+        "X-SH-Access-Token": "",
+        "X-YP-GRAY-FLAG": "undefined",
+        "Content-Type": "application/json",
+        "X-YP-Client-Id": CLOUD_CLIENT_ID,
+        "token": token,
+        "Origin": "https://panservice.mail.wo.cn",
+        "Referer": referer or (
+            f"https://panservice.mail.wo.cn/h5/activitymobile/{CLOUD_BATTLE_PAGE}"
+            f"?activityId={quote(activity_id)}&type=02&touchpoint={CLOUD_BATTLE_TOUCHPOINT}"
+            f"&clientid={CLOUD_CLIENT_ID}&token={token}"
+        ),
+    }
+
+
+def battle_enter(session, state, activity_id):
+    token = (state or {}).get("userToken") or ""
+    if not token:
+        return ""
+    entry = (
+        f"https://panservice.mail.wo.cn/h5/activitymobile/{CLOUD_BATTLE_PAGE}"
+        f"?activityId={quote(activity_id)}&touchpoint={CLOUD_BATTLE_TOUCHPOINT}"
+        f"&clientid={CLOUD_CLIENT_ID}&token={token}"
+    )
+    try:
+        r = session.get(
+            "https://m.client.10010.com/mobileService/openPlatform/openPlatLineNew.htm",
+            params={"to_url": entry},
+            headers={"User-Agent": APP_UA},
+            allow_redirects=False,
+            timeout=15,
+        )
+    except Exception as e:
+        print(f"  上传大比拼: 进入活动页异常: {e}")
+        return ""
+    url = r.headers.get("location") or r.headers.get("Location") or ""
+    for _ in range(4):
+        if not url:
+            break
+        if url.startswith("/"):
+            url = urljoin("https://panservice.mail.wo.cn", url)
+        q = parse_qs(urlparse(url).query)
+        new_token = (q.get("token") or [""])[0]
+        if new_token:
+            state["userToken"] = new_token
+        if "ticket=" in url:
+            return url.split("#", 1)[0]
+        try:
+            nxt = session.get(url, headers={"User-Agent": APP_UA}, allow_redirects=False, timeout=15)
+        except Exception:
+            break
+        loc = nxt.headers.get("location") or nxt.headers.get("Location") or ""
+        if not loc or loc == url:
+            return url.split("#", 1)[0] if "ticket=" in url else ""
+        url = loc
+    return ""
+
+
+def cloud_battle_task(session, state, cookie_header=None):
+    print("==== 云盘上传大比拼 ====")
+    if not (state or {}).get("userToken"):
+        print("  上传大比拼: 缺少 userToken，跳过")
+        return
+    activity_id = cloud_env("UNICOM_BATTLE_ACTIVITY_ID", CLOUD_BATTLE_DEFAULT)
+    referer = battle_enter(session, state, activity_id)
+    if not referer:
+        print("  上传大比拼: 进入活动页失败")
+        return
+    headers = battle_headers(state, activity_id, referer)
+    try:
+        status = session.get(
+            "https://panservice.mail.wo.cn/activity/activity-status",
+            params={"activityId": activity_id},
+            headers=headers,
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  上传大比拼: 查询活动状态异常: {e}")
+        return
+    if cloud_meta_code(status) != "200":
+        print(f"  上传大比拼: 查询活动状态失败 {status.get('meta', {}).get('message') or cloud_meta_code(status)}")
+        return
+    activity_status = safe_int((status.get("result") or {}).get("activityStatus"), -1)
+    if activity_status != 1:
+        print("  上传大比拼: 活动未上线或已结束，可用 UNICOM_BATTLE_ACTIVITY_ID 换期")
+        return
+    try:
+        check = session.get(
+            "https://panservice.mail.wo.cn/activity/checkActivityStatus",
+            params={"activityId": activity_id},
+            headers=headers,
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  上传大比拼: 查询冲榜状态异常: {e}")
+        return
+    opened = safe_int((check.get("result") or {}).get("state"), 0) == 1 if cloud_meta_code(check) == "200" else None
+    if opened is None:
+        print("  上传大比拼: 查询冲榜状态失败")
+        return
+    if not opened:
+        province_code, province_name = cloud_phone_location(session, state, cookie_header)
+        if not province_code or not province_name:
+            print("  上传大比拼: 冲榜未开启，缺省份信息")
+            return
+        try:
+            open_res = session.post(
+                "https://panservice.mail.wo.cn/activity/openActivity",
+                json={
+                    "activityId": activity_id,
+                    "provinceCode": province_code,
+                    "provinceName": province_name,
+                },
+                headers=headers,
+                timeout=10,
+            ).json()
+        except Exception as e:
+            print(f"  上传大比拼: 开启冲榜异常: {e}")
+            return
+        if cloud_meta_code(open_res) == "200" and safe_int((open_res.get("result") or {}).get("state"), 0) == 1:
+            print(f"  上传大比拼: 开启冲榜成功 {province_name}")
+        else:
+            print(f"  上传大比拼: 开启冲榜失败 {open_res.get('meta', {}).get('message') or cloud_meta_code(open_res)}")
+            return
+    else:
+        print("  上传大比拼: 冲榜已开启")
+    try:
+        records = session.get(
+            "https://panservice.mail.wo.cn/activity/lottery/recordList",
+            params={"activityId": activity_id},
+            headers=headers,
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  上传大比拼: 查询抽奖记录异常: {e}")
+        return
+    today = env_today()
+    for item in records.get("result") or []:
+        if isinstance(item, dict) and str(item.get("createTime") or "")[:10] == today:
+            print("  上传大比拼: 今日已抽奖")
+            return
+    def battle_times():
+        try:
+            res = session.get(
+                "https://panservice.mail.wo.cn/activity/lottery/lottery-times",
+                params={"activityId": activity_id},
+                headers=headers,
+                timeout=10,
+            ).json()
+        except Exception as e:
+            print(f"  上传大比拼: 查询抽奖次数异常: {e}")
+            return None, 0
+        result = res.get("result")
+        count = result if isinstance(result, int) else 0
+        return res, max(count, 0)
+
+    times_res, times = battle_times()
+    if times_res is None:
+        return
+    if times <= 0:
+        upload_urls = [
+            u.strip()
+            for u in cloud_env("UNICOM_BATTLE_UPLOAD_URL", CLOUD_BATTLE_UPLOAD_DEFAULT).split(",")
+            if u.strip()
+        ]
+        file_name = cloud_env("UNICOM_CLOUD_BATTLE_FILE", "文本.txt") or "文本.txt"
+        content = (cloud_env("UNICOM_CLOUD_BATTLE_CONTENT", "1") or "1").encode("utf-8")
+        uploaded = False
+        for url in upload_urls:
+            ok, msg = cloud_upload2c(session, state, url, file_name, content, referer=referer)
+            print(f"  上传大比拼: {msg}")
+            if ok:
+                uploaded = True
+                break
+        if uploaded:
+            for i in range(8):
+                if i:
+                    sleep(1)
+                _, times = battle_times()
+                if times > 0:
+                    break
+        if times <= 0:
+            print("  上传大比拼: 上传后未获得抽奖次数")
+            return
+    print(f"  上传大比拼: 抽奖次数 {times}")
+    res = cloud_signed_post(session, state, "/activity/lottery", "activity:lottery", activity_id, headers=headers)
+    if cloud_meta_code(res) == "200":
+        prize = (res.get("result") or {}).get("prizeName") or "未知奖品"
+        print(f"  上传大比拼: 抽奖成功 {prize}")
+    else:
+        print(f"  上传大比拼: 抽奖失败 {res.get('meta', {}).get('message') or cloud_meta_code(res)}")
+
+
+def cloud_pan_task(session, cookie_header=None):
+    print("==== 联通云盘 ====")
+    state = cloud_pan_login(session, cookie_header)
+    if not state:
+        return
+    sleep(0.5)
+    cloud_userinfo(session, state)
+    cloud_secret_key(session, state)
+    cloud_run_daily_tasks(session, state)
+    sleep(0.5)
+    cloud_userinfo(session, state)
+    sleep(1)
+    cloud_draw_lottery(session, state)
+    sleep(1)
+    campus_task(session, state)
+    sleep(1)
+    cloud_battle_task(session, state, cookie_header)
+
+
+def woread_aes(data):
+    if isinstance(data, dict):
+        plain = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    else:
+        plain = str(data)
+    cipher = AES.new(WOREAD_KEY, AES.MODE_CBC, WOREAD_IV)
+    ct = cipher.encrypt(pad(plain.encode("utf-8"), 16))
+    return base64.b64encode(ct.hex().encode()).decode()
+
+
+def woread_aes_phone(phone):
+    cipher = AES.new(WOREAD_KEY, AES.MODE_CBC, WOREAD_IV)
+    ct = cipher.encrypt(pad(str(phone).encode("utf-8"), 16))
+    return base64.b64encode(ct.hex().encode()).decode()
+
+
+def woread_ts():
+    return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+def woread_task(session, cookie_header=None, mobile=""):
+    print("==== 沃阅读积分 ====")
+    ecs_token = session.cookies.get("ecs_token") or cookie_get(cookie_header, "ecs_token")
+    mobile = mobile or session.cookies.get("c_mobile") or cookie_get(cookie_header, "c_mobile") or ""
+    if not ecs_token or not mobile:
+        print("  沃阅读: 缺少 ecs_token 或手机号，跳过")
+        return
+    hdrs = {
+        "User-Agent": APP_UA,
+        "Content-Type": "application/json;charset=UTF-8",
+        "Referer": "https://10010.woread.com.cn/ng_woread/",
+        "Origin": "https://10010.woread.com.cn",
+    }
+    session.cookies.set("ecs_token", ecs_token, domain=".woread.com.cn")
+    session.cookies.set("ecs_token", ecs_token, domain=".10010.com.cn")
+    session.cookies.set("u_account", mobile, domain=".woread.com.cn")
+    ts_ms = str(int(time.time() * 1000))
+    md5sig = hashlib.md5(f"{WOREAD_APPID}{WOREAD_APPSECRET}{ts_ms}".encode()).hexdigest()
+    try:
+        r = session.post(
+            f"{WOREAD_BASE}/app/auth/{WOREAD_APPID}/{ts_ms}/{md5sig}",
+            headers=hdrs,
+            json={"sign": woread_aes({"timestamp": woread_ts()})},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  沃阅读: getAccessToken 异常: {e}")
+        return
+    accesstoken = ((r.get("data") or {}) if isinstance(r.get("data"), dict) else {}).get("accesstoken") if str(r.get("code")) == "0000" else ""
+    if not accesstoken:
+        print(f"  沃阅读: getAccessToken 失败: {r.get('message') or r.get('code')}")
+        return
+    hdrs["accesstoken"] = accesstoken
+    try:
+        r = session.post(
+            f"{WOREAD_BASE}/account/login",
+            headers={**hdrs, "noPassToken": "true"},
+            json={"sign": woread_aes({"phone": woread_aes_phone(mobile), "timestamp": woread_ts()})},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  沃阅读: accountLogin 异常: {e}")
+        return
+    if str(r.get("code")) != "0000":
+        print(f"  沃阅读: accountLogin 失败: {r.get('message') or r.get('code')}")
+        return
+    d = r.get("data") or {}
+    token, verify_code = d.get("token") or "", d.get("verifycode") or ""
+    user_id, user_index = d.get("userid") or "", d.get("userindex") or ""
+    if not token or not verify_code:
+        print("  沃阅读: accountLogin 凭证不完整")
+        return
+    print(f"  沃阅读: 登录成功 {mobile[:3]}****{mobile[-4:] if len(mobile) >= 7 else ''}")
+    user_fields = {
+        "token": token,
+        "userId": user_id,
+        "userIndex": user_index,
+        "userAccount": mobile,
+        "verifyCode": verify_code,
+    }
+    try:
+        r = session.post(
+            f"{WOREAD_BASE}/activity/getPointCenterTicket",
+            headers=hdrs,
+            json={"sign": woread_aes({"timestamp": woread_ts(), **user_fields})},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        print(f"  沃阅读: 换票异常: {e}")
+        return
+    well_url = r.get("data") or "" if str(r.get("code")) == "0000" else ""
+    if not isinstance(well_url, str) or "ticket=" not in well_url:
+        print(f"  沃阅读: 换票失败: {r.get('message') or r.get('code')}")
+        return
+    ticket = re.search(r"ticket=([^&]+)", well_url).group(1)
+    print("  沃阅读: 换票成功")
+    try:
+        r = session.get(
+            "https://m.jf.10010.com/jf-external-application/jftask/getSecretKey",
+            headers={
+                "ticket": ticket,
+                "partnersid": WOREAD_JF_PARTNERS,
+                "clienttype": "aiting_unicom",
+                "User-Agent": APP_UA,
+                "Referer": well_url,
+                "Accept": "application/json, text/plain, */*",
+            },
+            timeout=10,
+        )
+        data = r.json()
+    except Exception as e:
+        print(f"  沃阅读: getSecretKey 异常: {e}")
+        return
+    if str(data.get("code")) != "0000":
+        print(f"  沃阅读: getSecretKey 失败: {data.get('message') or data.get('code')}")
+        return
+    secret_key = ((data.get("data") or {}) if isinstance(data.get("data"), dict) else {}).get("secretKey") or ""
+    if not secret_key:
+        print("  沃阅读: getSecretKey 无密钥")
+        return
+    jea = session.cookies.get("_jea_id") or ""
+    cookie = r.headers.get("Set-Cookie") or ""
+    match = re.search(r"_jea_id=([^;]+)", cookie)
+    if match:
+        jea = match.group(1)
+
+    def jf_headers():
+        ts = str(int(time.time() * 1000))
+        nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+        sig = hmac.new(secret_key.encode(), f"{nonce}{ts}".encode(), hashlib.sha256).hexdigest()
+        return {
+            "ticket": ticket,
+            "User-Agent": APP_UA,
+            "partnersid": WOREAD_JF_PARTNERS,
+            "clienttype": "aiting_unicom",
+            "Cookie": f"_jea_id={jea}",
+            "X-Request-Timestamp": ts,
+            "X-Request-Nonce": nonce,
+            "X-Request-Signature": sig,
+            "Referer": well_url,
+            "Origin": "https://m.jf.10010.com",
+            "Content-Type": "application/json;charset=UTF-8",
+            "Accept": "application/json, text/plain, */*",
+        }
+
+    chapter_params = {
+        "chapterSeno": "3",
+        "cntIndex": WOREAD_CNTINDEX,
+        "beginChapter": 4,
+        "timestamp": woread_ts(),
+        **user_fields,
+    }
+    try:
+        r = session.post(
+            f"{WOREAD_BASE}/cnt/readChapter?cntindex={WOREAD_CNTINDEX}&chapterallindex={WOREAD_CHAPTERALLINDEX}&chapterseno=3",
+            headers=hdrs,
+            json={"sign": woread_aes(chapter_params)},
+            timeout=15,
+        ).json()
+        if str(r.get("code")) == "0000":
+            print("  沃阅读: readChapter 成功")
+        else:
+            print(f"  沃阅读: readChapter {r.get('message') or r.get('code')}")
+    except Exception as e:
+        print(f"  沃阅读: readChapter 异常: {e}")
+    sleep(1)
+    try:
+        session.post(
+            f"{WOREAD_BASE}/basics/newreadadd",
+            headers=hdrs,
+            json={"sign": woread_aes({
+                "userid": user_id,
+                "cntindex": WOREAD_CNTINDEX,
+                "chapterallindex": WOREAD_CHAPTERALLINDEX,
+                "cnttype": 1,
+                "cntname": "大清权臣李鸿章",
+                "chaptertitle": "少年，胸怀壮志",
+                "readtype": 1,
+                "timestamp": woread_ts(),
+                **user_fields,
+            })},
+            timeout=15,
+        )
+    except Exception:
+        pass
+    sleep(1)
+    try:
+        r = session.post(
+            f"{WOREAD_BASE}/history/addReadTime",
+            headers=hdrs,
+            json={"sign": woread_aes({
+                "readTime": 2,
+                "cntIndex": WOREAD_CNTINDEX,
+                "cntType": 1,
+                "cntindex": WOREAD_CNTINDEX,
+                "cnttype": 1,
+                "chapterallindex": WOREAD_CHAPTERALLINDEX,
+                "chapterseno": 3,
+                "channelid": "18000688",
+                "chapterid": "13120941003",
+                "readtype": 1,
+                "isend": "0",
+                "timestamp": woread_ts(),
+                **user_fields,
+            })},
+            timeout=15,
+        ).json()
+        if str(r.get("code")) == "0000":
+            print(f"  沃阅读: 阅读上报 +2分钟 weektime={(r.get('data') or {}).get('weektime')}")
+        else:
+            print(f"  沃阅读: 阅读上报 {r.get('message') or r.get('code')} (冷却/已满)")
+    except Exception as e:
+        print(f"  沃阅读: 阅读上报异常: {e}")
+    try:
+        r = session.post(
+            "https://m.jf.10010.com/jf-external-application/uasptask/sign",
+            headers=jf_headers(),
+            json={"taskCode": WOREAD_SIGN_TASK},
+            timeout=10,
+        ).json()
+        if str(r.get("code")) == "0000":
+            info = r.get("data") or {}
+            print(f"  沃阅读: 签到成功 {info.get('title', '')} +{info.get('score', '')}")
+        else:
+            print(f"  沃阅读: 签到 {r.get('message') or r.get('code')} (可能已签)")
+    except Exception as e:
+        print(f"  沃阅读: 签到异常: {e}")
+    try:
+        r = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/taskDetail",
+            headers=jf_headers(),
+            json={},
+            timeout=10,
+        ).json()
+    except Exception as e:
+        print(f"  沃阅读: taskDetail 异常: {e}")
+        return
+    if str(r.get("code")) != "0000":
+        print(f"  沃阅读: taskDetail 失败: {r.get('message') or r.get('code')}")
+        return
+    tasks = ((r.get("data") or {}).get("taskDetail") or {}).get("taskList") or []
+    skip_kw = ("邀请", "会员", "分享", "限时福利")
+    claimed = 0
+    for t in tasks:
+        name = t.get("taskName") or ""
+        if any(k in name for k in skip_kw):
+            continue
+        if safe_int(t.get("finishCount"), 0) >= safe_int(t.get("needCount"), 1):
+            continue
+        try:
+            r2 = session.post(
+                "https://m.jf.10010.com/jf-external-application/jftask/toFinish",
+                headers=jf_headers(),
+                json={"taskCode": t.get("taskCode")},
+                timeout=10,
+            ).json()
+            ok = r2.get("data") is True or str(r2.get("code")) == "0000"
+        except Exception:
+            ok = False
+        print(f"  沃阅读: 领积分 [{name}]: {'成功' if ok else '未达条件'}")
+        if ok:
+            claimed += 1
+        sleep(1)
+    try:
+        r3 = session.post(
+            "https://m.jf.10010.com/jf-external-application/jftask/userInfo",
+            headers=jf_headers(),
+            json={},
+            timeout=10,
+        ).json()
+        if str(r3.get("code")) == "0000":
+            ui = r3.get("data") or {}
+            print(f"  沃阅读: 今日积分 {ui.get('todayEarnScore')} 可用 {ui.get('availableScore')} 累计 {ui.get('allEarnScore')}")
+    except Exception:
+        pass
+    print(f"  沃阅读: 共领 {claimed} 项积分")
+
+
 def run_all(session, cookie_header=None, mobile="", grab_only=False):
     if cookie_header:
         apply_cookie(session, cookie_header)
@@ -2259,6 +3484,8 @@ def run_all(session, cookie_header=None, mobile="", grab_only=False):
     ttxc_task(session, cookie_header)
     market_rights_lottery(session, cookie_header)
     uphone_points_task(session, cookie_header)
+    cloud_pan_task(session, cookie_header)
+    woread_task(session, cookie_header, mobile=mobile)
     sign_get_telephone(session, cookie_header, is_initial=False, ctx=ctx)
     sign_query_my_prizes(session, cookie_header)
     return ok, msg

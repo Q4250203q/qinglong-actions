@@ -39,6 +39,15 @@ python3 runner.py --due
 
 把 `ydyp`、`UNICOM_ACCOUNT`、`UNICOM_COOKIE` 填到 `.env`（参考 `.env.example`）后再执行。
 
+`unicom_sign.py` 一次跑完联通活动集合（Cookie / `ecs_token`）：
+
+- 营业厅：首页签到、领奖、话费红包、月签、任务中心、SigninApp、娱乐打卡/沃之树/流量、金币抽奖、天天领现金、通通乡村、权益超市抽奖、会员中心、周一抢兑
+- 云手机：沃云手机积分签到/任务
+- 云盘：SSO、积分任务、校园季上传/AI/抽奖、上传大比拼冲榜/抽奖
+- 阅读：沃阅读积分（登录、刷时长、签到、领积分）
+
+云盘活动换期可改 `.env`：`UNICOM_CAMPUS_ACTIVITY_ID`、`UNICOM_BATTLE_ACTIVITY_ID`、`UNICOM_BATTLE_UPLOAD_URL`。
+
 ## 拉库（青龙 / 呆呆面板）
 
 仓库：`https://github.com/Q4250203q/qinglong-actions.git`
