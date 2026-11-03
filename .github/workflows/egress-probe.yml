@@ -22,46 +22,49 @@ jobs:
           ydyp: ${{ secrets.YDYP_PROBE_TMP }}
         run: |
           cd scripts && python3 -u - <<'PY'
-          import os, socket, sys, json, requests, base64
+          import os, socket, sys, time, uuid, base64, requests
           socket.setdefaulttimeout(25)
           sys.path.insert(0, '.')
           import mcloud
           raw = os.environ.get('ydyp', '').strip().strip("'")
-          print('账号数:', len(raw.split('&')) if raw else 0)
-          if not raw:
-              sys.exit('没有 ydyp')
           yp = mcloud.YP(raw.split('&')[0])
-          print('refresh:', 'OK' if yp.refresh_authorization_token() else 'FAIL')
+          yp.refresh_authorization_token()
           tok = yp.sso()
-          print('ssoToken:', ('OK len=%d' % len(tok)) if tok else 'FAIL')
-          if not tok:
-              sys.exit(1)
-          for base in ('https://caiyun.feixin.10086.cn:7071', 'https://caiyun.feixin.10086.cn',
-                       'https://m.mcloud.139.com'):
-              u = f'{base}/portal/auth/tyrzLogin.action?ssoToken={tok}'
-              try:
-                  r = requests.post(u, headers=yp.jwtHeaders, timeout=25)
-                  try:
-                      j = r.json()
-                      code = j.get('code'); has = bool((j.get('result') or {}).get('token'))
-                      print(f'tyrzLogin {base}: HTTP={r.status_code} code={code} 取到JWT={has}')
-                      if has:
-                          jt = j['result']['token']
-                          print('  JWT长度:', len(jt))
-                          # 只读: 用 JWT 查签到状态，不做任何写操作
-                          yp.build_market_context(jt)
-                          q = yp.request_market_json(f'{yp.market_base_url}/market/signin/page/infoV3',
-                                                     params={'client': 'app'})
-                          res = (q or {}).get('result') or {}
-                          print('  infoV3 code=', (q or {}).get('code'),
-                                'todaySignIn=', res.get('todaySignIn'),
-                                'total=', res.get('total'), 'toReceive=', res.get('toReceive'))
-                          sys.exit(0)
-                  except ValueError:
-                      print(f'tyrzLogin {base}: HTTP={r.status_code} 非JSON: {r.text[:60]!r}')
-              except Exception as e:
-                  print(f'tyrzLogin {base}: ERR {type(e).__name__}')
-          print('结论: 所有候选落点均未能换取 JWT')
+          print('ssoToken:', 'OK' if tok else 'FAIL')
+          phone, token = base64.b64decode(yp.Authorization.split()[1] + '==').decode().split(':', 2)[1:]
+          DEV = '|'.join(['5','127.0.0.1','1','13.2.6','Xiaomi','M2007J1SC', uuid.uuid4().hex.upper(),
+                          '02-00-00-00-00-00','android 13','1080X2125','zh','','','032','0', uuid.uuid4().hex[:16], ''])
+          b64 = lambda x: base64.b64encode(x.encode()).decode()
+          APP = {'User-Agent':'okhttp/4.12.0','Accept-Charset':'UTF-8','x-SvcType':'1','x-MM-Source':'032',
+                 'x-NetType':'5','x-DeviceInfo':DEV,'x-m4c-account':b64(phone),'x-m4c-token':b64(token),
+                 'x-m4c-caller':'app','CloudCC-AppCode':'0011','Authorization':yp.Authorization}
+          HOSTS = ['https://caiyun.feixin.10086.cn:7071','https://caiyun.feixin.10086.cn']
+          print('--- A 脚本自带 jwtHeaders ---')
+          for h in HOSTS:
+              r = requests.post(f'{h}/portal/auth/tyrzLogin.action?ssoToken={tok}', headers=yp.jwtHeaders, timeout=25)
+              print(f'  {r.status_code} {h}')
+          print('--- B App式 okhttp+x-m4c ---')
+          for h in HOSTS:
+              r = requests.post(f'{h}/portal/auth/tyrzLogin.action?ssoToken={tok}', headers=APP, timeout=25)
+              try: j = r.json(); ok = bool((j.get('result') or {}).get('token'))
+              except ValueError: j, ok = None, False
+              print(f'  {r.status_code} {h} code={j.get("code") if j else "-"} 取到JWT={ok}')
+              if ok:
+                  jt = j['result']['token']; print('  JWT长度:', len(jt))
+                  yp.build_market_context(jt)
+                  q = yp.request_market_json(f'{yp.market_base_url}/market/signin/page/infoV3', params={'client':'app'})
+                  res = (q or {}).get('result') or {}
+                  print('  infoV3 code=', (q or {}).get('code'), 'todaySignIn=', res.get('todaySignIn'), 'total=', res.get('total'))
+                  sys.exit(0)
+          print('--- C 重复3次看 502 抖动 ---')
+          for i in range(3):
+              r = requests.post(f'{HOSTS[0]}/portal/auth/tyrzLogin.action?ssoToken={tok}', headers=yp.jwtHeaders, timeout=25)
+              try: j=r.json(); ok=bool((j.get('result') or {}).get('token'))
+              except ValueError: j, ok = None, False
+              print(f'  第{i+1}次 {r.status_code} 取到JWT={ok} code={j.get("code") if j else "-"}')
+              time.sleep(4)
+          print('结论: 当前出口下仍无法换取 JWT')
           PY
+
       - name: 说明
         run: echo "本 workflow 不执行签到/领取等写操作; 探完即删除, 并清理临时 secret。"
