@@ -1,0 +1,29 @@
+name: egress-probe (临时·只读·探完即删)
+
+# 用途: 从 GitHub 出口对照 caiyun tyrzLogin 路由状态, 判断 404 是否只对机房 IP 生效
+# 说明: 不含任何凭据/密钥, 不执行签到, 只读取 HTTP 状态码。用完即删。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: probe
+        run: |
+          set +e
+          echo "== 出口信息 =="
+          curl -s --max-time 15 https://ipinfo.io/json | tr -d ' \n"' | sed 's/,/  /g' | cut -c1-220; echo
+          echo "== tyrzLogin 各落点 (POST, 无 token) =="
+          for h in "https://caiyun.feixin.10086.cn:7071" "https://caiyun.feixin.10086.cn" "https://m.mcloud.139.com" "https://yun.139.com"; do
+            c=$(curl -s -o /dev/null --max-time 25 -w "%{http_code}" -X POST "$h/portal/auth/tyrzLogin.action?ssoToken=x")
+            echo "  $c  $h/portal/auth/tyrzLogin.action"
+          done
+          echo "== 同域名对照(应当非404) =="
+          for u in "https://caiyun.feixin.10086.cn/market/signin/page/infoV3?client=app" "https://orches.yun.139.com/orchestration/auth-rebuild/token/v1.0/querySpecToken"; do
+            c=$(curl -s -o /dev/null --max-time 25 -w "%{http_code}" -X POST "$u")
+            echo "  $c  $u"
+          done
